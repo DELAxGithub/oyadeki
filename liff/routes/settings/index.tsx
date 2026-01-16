@@ -1,7 +1,19 @@
 import { Head } from "$fresh/runtime.ts";
-import SettingsForm from "../../islands/SettingsForm.tsx";
+import { Handlers, PageProps } from "$fresh/server.ts";
+import LiffApp from "../../islands/LiffApp.tsx";
 
-export default function SettingsPage() {
+interface PageData {
+  liffId: string;
+}
+
+export const handler: Handlers<PageData> = {
+  GET(_req, ctx) {
+    const liffId = Deno.env.get("LIFF_ID") ?? "";
+    return ctx.render({ liffId });
+  },
+};
+
+export default function SettingsPage({ data }: PageProps<PageData>) {
   return (
     <>
       <Head>
@@ -14,11 +26,18 @@ export default function SettingsPage() {
               font-size: 18px;
               line-height: 1.5;
             }
+            .animate-spin {
+              animation: spin 1s linear infinite;
+            }
+            @keyframes spin {
+              from { transform: rotate(0deg); }
+              to { transform: rotate(360deg); }
+            }
           `}
         </style>
       </Head>
       <div class="min-h-screen bg-white">
-        <SettingsForm lineUserId={null} />
+        <LiffApp liffId={data.liffId} />
       </div>
     </>
   );

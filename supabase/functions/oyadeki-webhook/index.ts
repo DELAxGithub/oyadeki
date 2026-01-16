@@ -222,6 +222,13 @@ async function handleMessageEvent(event: LineEvent) {
         ]);
         console.log("Draft message sent, latency:", latencyMs, "ms");
 
+        // usage_logsにログ記録
+        await logUsage(userId, "draft_gen", {
+          draft_id: draftId,
+          latency_ms: latencyMs,
+          input_length: message.text.length,
+        });
+
       } catch (error) {
         console.error("Error generating draft:", error);
         await replyMessage(replyToken, [
@@ -286,15 +293,14 @@ serve(async (req) => {
       return new Response("Server configuration error", { status: 500 });
     }
 
-    // 署名検証（デバッグのため一時的にスキップ）
-    // TODO: 本番では有効にする
-    // const isValid = await verifySignature(body, signature, channelSecret);
-    // if (!isValid) {
-    //   console.error("Invalid signature");
-    //   return new Response("Invalid signature", { status: 401 });
-    // }
+    // 署名検証（本番有効）
+    const isValid = await verifySignature(body, signature, channelSecret);
+    if (!isValid) {
+      console.error("Invalid signature");
+      return new Response("Invalid signature", { status: 401 });
+    }
 
-    console.log("Signature valid, parsing body");
+    console.log("Signature verified, parsing body");
     const webhookBody: LineWebhookBody = JSON.parse(body);
 
     // イベントがない場合（検証リクエスト）は即座に200を返す

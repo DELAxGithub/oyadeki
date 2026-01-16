@@ -7,7 +7,7 @@
 | 項目 | 技術 | 状態 |
 |------|------|------|
 | Webhook/API | Supabase Edge Functions (Deno) | ✅ 稼働中 |
-| 設定UI | Deno Fresh → Deno Deploy | 📁 コード済み |
+| 設定UI | Deno Fresh → Deno Deploy | ✅ 稼働中 |
 | DB | Supabase PostgreSQL + RLS | ✅ 稼働中 |
 | AI | Gemini 2.5 Flash | ✅ 稼働中 |
 
@@ -27,33 +27,40 @@
 
 | タスク | 状態 | 備考 |
 |--------|------|------|
-| Edge関数（署名検証・デデュープ・timeoutフォールバック） | ✅ | 署名検証は一時無効 |
+| Edge関数（署名検証・デデュープ・timeoutフォールバック） | ✅ | 署名検証有効化済み |
 | user_contexts/usage_logs + RLS | ✅ | マイグレーション済み |
 | 下書きA/B/C＋質問＋通話文を返す | ✅ | Flex Message実装 |
-| draft_gen/latency_ms計測 | 🔲 | ログ記録未実装 |
+| draft_gen/latency_ms計測 | ✅ | usage_logsに記録中 |
 
 ### W1 残作業
-- [ ] usage_logsへのログ記録を有効化
-- [ ] 署名検証を本番で有効化
-- [ ] レイテンシ計測の確認
+- [x] usage_logsへのログ記録を有効化
+- [x] 署名検証を本番で有効化
+- [x] レイテンシ計測の確認
 
 ---
 
-## W2: LIFF設定（特大UI）
+## W2: LIFF設定（特大UI） 🚧 進行中
 > Exit：設定変更→次返信に反映
 
 | タスク | 状態 | 備考 |
 |--------|------|------|
-| 趣味/トーン/NG語/メタファーON-OFF | 📁 | SettingsForm.tsx作成済み |
-| 同意（consented_at） | 📁 | UIに実装済み |
-| LINEログイン紐付け（line_user_id） | 🔲 | LIFF SDK連携必要 |
-| Deno Deployへデプロイ | 🔲 | 未実施 |
-| 設定反映の動作確認 | 🔲 | 未実施 |
+| 趣味/トーン/NG語/メタファーON-OFF | ✅ | SettingsForm.tsx完成 |
+| 同意（consented_at） | ✅ | UIに実装済み |
+| LINEログイン紐付け（line_user_id） | ✅ | LiffApp.tsxでLIFF SDK連携 |
+| Deno Deployへデプロイ | ✅ | oyadeki-liff.deno.dev |
+| Deno Deploy環境変数設定 | 🔲 | 手動設定必要 |
+| LINE DevelopersでLIFFエンドポイント設定 | 🔲 | 手動設定必要 |
+| 設定反映の動作確認 | 🔲 | 上記完了後 |
 
-### W2 タスク詳細
-1. LIFF設定画面をDeno Deployにデプロイ
-2. LINE DevelopersでLIFFエンドポイント設定
-3. 設定保存→Webhook側で読み込み→返信に反映
+### W2 残タスク（手動）
+1. **Deno Deploy環境変数設定**: https://dash.deno.com/projects/oyadeki-liff/settings
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `LIFF_ID`
+2. **LINE DevelopersでLIFF設定**:
+   - エンドポイントURL: `https://oyadeki-liff.deno.dev/settings`
+   - Scope: `profile`
+3. 設定保存→Webhook側で読み込み→返信に反映確認
 
 ---
 
@@ -63,8 +70,8 @@
 | タスク | 状態 | 備考 |
 |--------|------|------|
 | 返信カードに「A/B/Cコピー／自分で書く」 | ✅ | Flex Message実装済み |
-| draft_gen_copy（draft_id,copy:true）記録 | 🔲 | Postback処理実装済み、ログ未確認 |
-| 自作（copy:false）を記録 | 🔲 | 同上 |
+| draft_gen_copy（draft_id,copy:true）記録 | ✅ | Postback処理でusage_logsに記録 |
+| 自作（copy:false）を記録 | ✅ | 同上 |
 | 自作率の可視化 | 🔲 | ダッシュボード未作成 |
 
 ---
@@ -123,7 +130,13 @@
 
 ### LINE
 - LIFF ID: `2008909268-tE6zSm0T`
+- LIFF URL: `https://oyadeki-liff.deno.dev/settings`
 - Webhook URL: `https://xnzlfpzecupaoilinddx.supabase.co/functions/v1/oyadeki-webhook`
+
+### Deno Deploy (LIFF)
+- Project: `oyadeki-liff`
+- URL: https://oyadeki-liff.deno.dev
+- Dashboard: https://dash.deno.com/projects/oyadeki-liff
 
 ### デプロイコマンド
 ```bash
@@ -147,4 +160,4 @@ npx supabase secrets set KEY=value
 
 ---
 
-*最終更新: 2026-01-16*
+*最終更新: 2026-01-17*

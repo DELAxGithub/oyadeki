@@ -31,3 +31,29 @@ export async function logUsage(
     meta,
   });
 }
+
+/**
+ * ユーザー設定を取得
+ */
+export interface UserContext {
+  line_user_id: string;
+  metaphor_theme?: string;
+  metaphor_enabled?: boolean;
+  tone?: string;
+  disliked_phrases?: string[];
+  consented_at?: string;
+}
+
+export async function getUserContext(lineUserId: string): Promise<UserContext | null> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("user_contexts")
+    .select("*")
+    .eq("line_user_id", lineUserId)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+  return data as UserContext;
+}

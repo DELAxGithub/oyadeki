@@ -1,123 +1,81 @@
-# オヤデキ ロードマップ & 進捗
+# オヤデキ ロードマップ (v2026-01-17 改訂版)
 
-## 全体概要
-親子コミュニケーションを支援するLINEボット。AIは「触媒」として下書き・話題タネ・通話ブリッジを提供。
+## 1. 目的・KGI
+*   **KGI**: 親の「デジタル詰み」を最短3手順で解消し、家族の摩擦を減らす。
+*   **副目標**: 解約・連絡先の「地図」（契約台帳）を家族と共有し、終活の初期摩擦を下げる。
 
-## 技術スタック
-| 項目 | 技術 | 状態 |
-|------|------|------|
-| Webhook/API | Supabase Edge Functions (Deno) | ✅ 稼働中 |
-| 設定UI | Deno Fresh → Deno Deploy | ✅ 稼働中 |
-| DB | Supabase PostgreSQL + RLS | ✅ 稼働中 |
-| AI | Gemini 2.5 Flash | ✅ 稼働中 |
+## 2. スコープ
+### In (やる)
+*   **W4.5**: Rich Menu & Personality (Zweigenトーン / 静かなBot運用) - **W4.5コード完了済**
+*   **W4**: デジタル救急箱 (Vision → 3手順 + 通話誘導) - **W4コード完了済**
+*   **W5**: 契約台帳 (Ledger) (生パスワード非保持 / ID・金額・解約メモ / グループ要約共有)
+*   **W6-lite**: 視聴「報告 & 指名視聴」 (URL受領 → 週1要約 / 1回だけの丁寧な提案)
+
+### Out (やらない)
+*   パスワード保管・自動入力
+*   視聴履歴の自動収集
+*   メルカリ相場推定/自動出品
+*   ダッシュボード大画面UI
+*   健康・位置情報
+
+## 3. 体制・運用
+*   **ルーム運用**: 親・子・Botの同室。Botは画像 or 呼びかけ時のみ発話。
+*   **役割**: Viewer(親), Custodian(子), Emergency(一時鍵)
+*   **トーン**: Zweigen比喩は「lite」が既定（濃さ可変）。
+
+## 4. 非機能要件
+*   **レイテンシ**: Vision応答 p95 ≤ 3.0s (画像〜返信)
+*   **信頼性**: Gemini障害時は定型の安全退避メッセージ
+*   **セキュリティ**: LINE署名検証必須 / RLS厳格 / ログPIIマスキング / 画像既定非保存
+*   **プライバシー**: グループには要約のみ、詳細はDMリンク (監査ログ記録)
+
+## 5. KPI (成功指標)
+*   **救急箱**: 再発行導線 → 完了率 ≥ 80%, JSON検証エラー < 1%
+*   **契約台帳**: 初週登録 ≥ 5件, 半年更新率 ≥ 70%
+*   **視聴W6-lite**: 週報既読率 ≥ 60%, 指名視聴リマインド既読率 ≥ 70%
 
 ---
 
-## W0: GASスパイク（任意）
-> 目的：体感確認。LINE↔GAS↔Gemini疎通
+## 📅 ロードマップ (2026-01-17 〜 02-07)
+
+### ✅ フェーズ0: W4.5 “運用完了” (1/17–1/19)
+> ゲート: メニューから4機能に到達でき、初回チュートリアルが配信できる。
 
 | タスク | 状態 | 備考 |
 |--------|------|------|
-| 最小往復の動画・学びのメモ | ⏭️ スキップ | 直接Supabaseで実装 |
+| Rich Menu画像作成 (赤・黒・金) | ✅ | 実装・生成完了 |
+| LINE OA Manager設置 & リンク設定 | 🔲 | 手動作業 (下記参照) |
+| チュートリアル文面確認 ("使い方") | ✅ | 実装済み |
+| グループ静音確認 | 🔲 | 実機確認 |
+| プロンプト魂入れ (Zweigen Soul) | ✅ | 実装・デプロイ済み |
 
----
+### 📁 フェーズ1: W4 救急箱 v1.1 完了 (1/20–1/25)
+> ゲート: 5ケースすべてグリーン / KPIが取得できる。
 
-## W1: 疎通MVP／計測土台 ✅ 完了
-> Exit：P50 ≤3.5s／ログ記録OK
+- [ ] 受け入れテスト (5ケース)
+    1. パスワード忘れ画面 → 3手順＋通話誘導 ✅
+    2. SMSコード未着 → 原因切り分け＋通話誘導 ✅
+    3. アプリ更新ダイアログ → ストア遷移案内 ✅
+    4. 決済系の警告 → 「赤紙＝危険」メタファで中止提案 ✅
+    5. 不明スクショ → 安全退避ルート ✅
+- [x] エラーハンドリング (Gemini失敗時の定型返答)
+- [x] KPIダッシュ (軽): 応答時間、検証エラー、👍率
 
-| タスク | 状態 | 備考 |
-|--------|------|------|
-| Edge関数（署名検証・デデュープ・timeoutフォールバック） | ✅ | 署名検証有効化済み |
-| user_contexts/usage_logs + RLS | ✅ | マイグレーション済み |
-| 下書きA/B/C＋質問＋通話文を返す | ✅ | Flex Message実装 |
-| draft_gen/latency_ms計測 | ✅ | usage_logsに記録中 |
+### 🔲 フェーズ2: W5 契約台帳 v1.0 (1/26–1/31)
+> ゲート: 親の台帳5件作成 / PDFを子が閲覧可能。
 
-### W1 残作業
-- [x] usage_logsへのログ記録を有効化
-- [x] 署名検証を本番で有効化
-- [x] レイテンシ計測の確認
+- [x] 登録フロー: スクショ/URL → 候補提案 → 2タップ保存 (生PWなし) - **コード実装済**
+- [ ] 共有機能: グループ要約 + 詳細DMリンク (期限付き)
+- [ ] 棚卸し機能: 登録5件で週報に「未確認あり」表示
+- [ ] エクスポート: CSV/PDF ("鍵は含まない"注意書き)
 
----
+### 🔲 フェーズ3: W6-lite v0.9 (2/1–2/7)
+> ゲート: 1週間の運用で週報 → 既読確認 / 指名視聴が1回正しく出る。
 
-## W2: LIFF設定（特大UI） 🚧 進行中
-> Exit：設定変更→次返信に反映
-
-| タスク | 状態 | 備考 |
-|--------|------|------|
-| 趣味/トーン/NG語/メタファーON-OFF | ✅ | SettingsForm.tsx完成 |
-| 同意（consented_at） | ✅ | UIに実装済み |
-| LINEログイン紐付け（line_user_id） | ✅ | LiffApp.tsxでLIFF SDK連携 |
-| Deno Deployへデプロイ | ✅ | oyadeki-liff.deno.dev |
-| Deno Deploy環境変数設定 | 🔲 | 手動設定必要 |
-| LINE DevelopersでLIFFエンドポイント設定 | 🔲 | 手動設定必要 |
-| 設定反映の動作確認 | 🔲 | 上記完了後 |
-
-### W2 残タスク（手動）
-1. **Deno Deploy環境変数設定**: https://dash.deno.com/projects/oyadeki-liff/settings
-   - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY`
-   - `LIFF_ID`
-2. **LINE DevelopersでLIFF設定**:
-   - エンドポイントURL: `https://oyadeki-liff.deno.dev/settings`
-   - Scope: `profile`
-3. 設定保存→Webhook側で読み込み→返信に反映確認
-
----
-
-## W3: コピー計測＆"自作"誘導
-> Exit：テスト家庭で自作率≥30%
-
-| タスク | 状態 | 備考 |
-|--------|------|------|
-| 返信カードに「A/B/Cコピー／自分で書く」 | ✅ | Flex Message実装済み |
-| draft_gen_copy（draft_id,copy:true）記録 | ✅ | Postback処理でusage_logsに記録 |
-| 自作（copy:false）を記録 | ✅ | 同上 |
-| 自作率の可視化 | 🔲 | ダッシュボード未作成 |
-
----
-
-## W4: 救急箱β（Vision）
-> Exit：10件中誤案内≤1件、注意喚起100%
-
-| タスク | 状態 | 備考 |
-|--------|------|------|
-| 画像→注意喚起→最大3手順 | 🔲 | gemini-client.tsにanalyzeImage実装済み |
-| 低確信は質問のみ | 🔲 | プロンプト設計必要 |
-| vision_helpログ記録 | 🔲 | 未実装 |
-
----
-
-## W5: 通話ブリッジ運用
-> Exit：通話誘発応答率≥40%
-
-| タスク | 状態 | 備考 |
-|--------|------|------|
-| call_suggest直後の確認 | 🔲 | 通話誘導文は返信に含まれる |
-| T+6h追跡 | 🔲 | スケジュール実行必要 |
-| LIFFに「通話できた」ボタン（call_done_self_report） | 🔲 | UI未実装 |
-
----
-
-## W6: 観測と安定化
-> Exit：KPIが週次で可視化、運用手順完成
-
-| タスク | 状態 | 備考 |
-|--------|------|------|
-| 週次ダッシュ（往復数・自作率・通話誘発・P50/P95） | 🔲 | |
-| 監視（Slack通知） | 🔲 | エラー率>2% or P95>7s |
-| 運用Runbook | 🔲 | |
-
----
-
-## KPI目標
-| 指標 | 目標 | 現状 |
-|------|------|------|
-| 自作率 | ≥30% | - |
-| コピー採用率 | A/B/C分布計測 | - |
-| 通話誘発応答率 | ≥40% | - |
-| レイテンシ P50 | ≤3.5s | 未計測 |
-| レイテンシ P95 | ≤7s | 未計測 |
-| 救急箱誤案内 | ≤10% | - |
+- [ ] URL受領: 1行受領メッセージ記録
+- [ ] 週報: 日曜19:00に3本まとめ (固定)
+- [ ] 指名視聴: 単発提案 (リマインド1回のみ)
+- [ ] 通知設定: 週報・提案のON/OFF
 
 ---
 
@@ -125,7 +83,6 @@
 
 ### Supabase
 - Project: `xnzlfpzecupaoilinddx`
-- Region: Northeast Asia (Tokyo)
 - Dashboard: https://supabase.com/dashboard/project/xnzlfpzecupaoilinddx
 
 ### LINE
@@ -134,30 +91,14 @@
 - Webhook URL: `https://xnzlfpzecupaoilinddx.supabase.co/functions/v1/oyadeki-webhook`
 
 ### Deno Deploy (LIFF)
-- Project: `oyadeki-liff`
 - URL: https://oyadeki-liff.deno.dev
-- Dashboard: https://dash.deno.com/projects/oyadeki-liff
 
 ### デプロイコマンド
 ```bash
-# Supabaseリンク
-npx supabase link --project-ref xnzlfpzecupaoilinddx
-
-# Edge Functionデプロイ
+# Edge Function
 npx supabase functions deploy oyadeki-webhook --no-verify-jwt
-
-# シークレット設定
-npx supabase secrets set KEY=value
 ```
 
 ---
 
-## 凡例
-- ✅ 完了
-- 📁 コード作成済み（未デプロイ/未確認）
-- 🔲 未着手
-- ⏭️ スキップ
-
----
-
-*最終更新: 2026-01-17*
+*最終更新: 2026-01-17 (v2)*

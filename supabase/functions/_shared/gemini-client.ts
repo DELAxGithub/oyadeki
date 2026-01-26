@@ -197,3 +197,224 @@ export async function extractLedgerInfo(
         return [];
     }
 }
+
+/**
+ * 画像のIntentを判定（help or media）
+ */
+export async function classifyImageIntent(
+    imageBase64: string,
+    mimeType: string
+): Promise<"help" | "media"> {
+    const prompt = `この画像を見て、以下のどちらか判定してください:
+
+1. "help" - スマホの操作に困っている画面
+   (エラー、設定、ダイアログ、警告、ログイン画面、アプリ更新など)
+
+2. "media" - 視聴中のコンテンツ
+   (テレビ番組、映画、スポーツ中継、YouTube、ライブ、コンサート、
+    映画ポスター、CDジャケット、本の表紙など)
+
+回答: help または media のみ（他の文字は含めない）`;
+
+    const apiKey = Deno.env.get("GEMINI_API_KEY")!;
+    const model = "gemini-2.0-flash";
+    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [
+                {
+                    parts: [
+                        { text: prompt },
+                        { inline_data: { mime_type: mimeType, data: imageBase64 } },
+                    ],
+                },
+            ],
+            generationConfig: {
+                maxOutputTokens: 10,
+                temperature: 0.1,
+            },
+        }),
+    });
+
+    if (!response.ok) {
+        console.error("classifyImageIntent failed:", response.status);
+        return "help"; // デフォルトはhelp（既存動作維持）
+    }
+
+    const data: GeminiResponse = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() ?? "";
+
+    if (text.includes("media")) {
+        return "media";
+    }
+    return "help";
+}
+
+export interface MediaInfo {
+    media_type: "movie" | "tv_show" | "sports" | "music" | "book" | "other";
+    title: string;
+    subtitle?: string;        // エピソード名、対戦カードなど
+    artist_or_cast?: string;  // 出演者、チーム名
+    year?: number;
+}
+
+/**
+ * 画像からメディア情報を識別
+ */
+export async function identifyMedia(
+    imageBase64: string,
+    mimeType: string
+): Promise<MediaInfo | null> {
+    const prompt = `この画像に映っているメディア（番組・映画・スポーツ・音楽など）を特定してください。
+
+【出力形式 - JSONのみ】
+{
+  "media_type": "movie" | "tv_show" | "sports" | "music" | "book" | "other",
+  "title": "タイトル名",
+  "subtitle": "エピソード名や対戦カードなど（あれば）",
+  "artist_or_cast": "出演者・アーティスト・チーム名",
+  "year": 2024（公開年・放送年、わかれば数値で）
+}
+
+【判定ガイド】
+- テレビ番組（ニュース、ドラマ、バラエティ） → tv_show
+- 映画（映画館、映画ポスター、配信映画） → movie
+- スポーツ中継（野球、サッカー、相撲など） → sports
+- 音楽番組、ライブ、CDジャケット → music
+- 本の表紙、読書画面 → book
+- それ以外 → other
+
+【例】
+- 大河ドラマの画面 → {"media_type": "tv_show", "title": "光る君へ", "subtitle": "第15話", "artist_or_cast": "吉高由里子", "year": 2024}
+- サッカー中継 → {"media_type": "sports", "title": "天皇杯決勝", "subtitle": "浦和レッズ vs 名古屋", "artist_or_cast": null, "year": 2024}
+
+特定できない場合は null を返してください。
+JSONのみを返し、Markdownコードブロックは不要です。`;
+
+    const apiKey = Deno.env.get("GEMINI_API_KEY")!;
+    const model = "gemini-2.0-flash";
+    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [
+                {
+                    parts: [
+                        { text: prompt },
+                        { inline_data: { mime_type: mimeType, data: imageBase64 } },
+                    ],
+                },
+            ],
+            generationConfig: {
+                response_mime_type: "application/json",
+                temperature: 0.3,
+            },
+        }),
+    });
+
+    if (!response.ok) {
+        console.error("identifyMedia failed:", response.status);
+        return null;
+    }
+
+    const data = await response.json();
+    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "null";
+
+    try {
+        const parsed = JSON.parse(jsonText);
+        if (parsed && parsed.title) {
+            return parsed as MediaInfo;
+        }
+        return null;
+    } catch (e) {
+        console.error("Failed to parse media JSON:", e);
+        return null;
+    }
+}
+
+export interface ListingInfo {
+    title: string;           // 出品タイトル（40文字以内）
+    description: string;     // 説明文
+    category: string;        // カテゴリ提案
+    condition: string;       // 商品の状態
+}
+
+/**
+ * 画像から出品用テキストを生成（メルカリ向け）
+ */
+export async function generateListing(
+    imageBase64: string,
+    mimeType: string
+): Promise<ListingInfo | null> {
+    const prompt = `この商品の写真を見て、メルカリ出品用のタイトルと説明文を作成してください。
+
+【出力形式 - JSONのみ】
+{
+  "title": "商品タイトル（40文字以内、検索されやすいキーワードを含める）",
+  "description": "商品説明文（200文字程度、状態・サイズ・使用感など）",
+  "category": "推定カテゴリ（例: レディース > トップス > Tシャツ）",
+  "condition": "商品の状態（新品未使用/未使用に近い/目立った傷や汚れなし/やや傷や汚れあり/傷や汚れあり/全体的に状態が悪い）"
+}
+
+【タイトルのコツ】
+- ブランド名があれば先頭に
+- サイズ・色を含める
+- 「美品」「新品」など状態を示す言葉
+- 例: 「【美品】ユニクロ フリースジャケット グレー Lサイズ」
+
+【説明文のコツ】
+- 最初に商品の概要
+- サイズ・寸法（わかれば）
+- 使用頻度・状態の詳細
+- 購入時期（推測でOK）
+- 最後に「ご質問があればお気軽にどうぞ！」
+
+JSONのみを返し、Markdownコードブロックは不要です。`;
+
+    const apiKey = Deno.env.get("GEMINI_API_KEY")!;
+    const model = "gemini-2.0-flash";
+    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [
+                {
+                    parts: [
+                        { text: prompt },
+                        { inline_data: { mime_type: mimeType, data: imageBase64 } },
+                    ],
+                },
+            ],
+            generationConfig: {
+                response_mime_type: "application/json",
+                temperature: 0.5,
+            },
+        }),
+    });
+
+    if (!response.ok) {
+        console.error("generateListing failed:", response.status);
+        return null;
+    }
+
+    const data = await response.json();
+    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "null";
+
+    try {
+        const parsed = JSON.parse(jsonText);
+        if (parsed && parsed.title && parsed.description) {
+            return parsed as ListingInfo;
+        }
+        return null;
+    } catch (e) {
+        console.error("Failed to parse listing JSON:", e);
+        return null;
+    }
+}

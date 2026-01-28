@@ -229,7 +229,7 @@ function buildVisionFlexMessage(
     contents.push({
       type: "box",
       layout: "vertical",
-      backgroundColor: "#FFE0E0",
+      backgroundColor: "#FFEBEB",
       cornerRadius: "md",
       paddingAll: "md",
       contents: [
@@ -336,7 +336,7 @@ function buildLedgerConfirmFlexMessage(items: LedgerItem[], messageId: string) {
         type: "box",
         layout: "vertical",
         contents: [
-          { type: "text", text: "📝 台帳登録案", weight: "bold", color: "#1DB446", size: "xs" },
+          { type: "text", text: "📝 台帳登録案", weight: "bold", color: "#06C755", size: "xs" },
           { type: "text", text: item.service_name, weight: "bold", size: "xl", margin: "md", wrap: true },
           {
             type: "box", layout: "vertical", margin: "md", spacing: "sm",
@@ -512,7 +512,7 @@ function buildLedgerListFlexMessage(items: any[], includeShareButton: boolean = 
             type: "box", layout: "vertical", margin: "md", spacing: "sm",
             contents: [
               { type: "text", text: `登録件数: ${items.length}件`, size: "md" },
-              { type: "text", text: `月額合計: ¥${total.toLocaleString()}`, size: "md", weight: "bold", color: "#1DB446" },
+              { type: "text", text: `月額合計: ¥${total.toLocaleString()}`, size: "md", weight: "bold", color: "#06C755" },
             ]
           }
         ]
@@ -607,7 +607,7 @@ function buildMediaConfirmFlexMessage(media: MediaInfo, messageId: string) {
         layout: "vertical",
         spacing: "md",
         contents: [
-          { type: "text", text: typeLabel, size: "sm", color: "#1DB954", weight: "bold" },
+          { type: "text", text: typeLabel, size: "sm", color: "#06C755", weight: "bold" },
           { type: "text", text: `${media.title} ${subtitleText}`, weight: "bold", size: "xl", wrap: true },
           ...(castText ? [{ type: "text", text: castText, size: "sm", color: "#666666", wrap: true }] : []),
           ...(yearText ? [{ type: "text", text: yearText, size: "xs", color: "#888888" }] : []),

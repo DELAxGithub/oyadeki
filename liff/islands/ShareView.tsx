@@ -36,10 +36,35 @@ export default function ShareView({ token }: ShareViewProps) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Mock data for testing or fallback
+    const mockData: ShareData = {
+      ledgers: [
+        { id: "1", service_name: "Netflix", category: "subscription", monthly_cost: 1490, account_identifier: "user@example.com", note: "プレミアムプラン", last_confirmed_at: new Date().toISOString(), created_at: new Date().toISOString() },
+        { id: "2", service_name: "東京電力", category: "utility", monthly_cost: 8500, account_identifier: "1234-5678", note: "1月分", last_confirmed_at: new Date().toISOString(), created_at: new Date().toISOString() },
+        { id: "3", service_name: "スマホ代", category: "telecom", monthly_cost: 3200, account_identifier: "090-xxxx-xxxx", note: null, last_confirmed_at: null, created_at: new Date().toISOString() },
+      ],
+      totalMonthlyCost: 13190,
+      expiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(), // 5 days later
+      accessedCount: 12,
+    };
+
+    if (token === "test-token-123" || token.startsWith("mock-")) {
+      setData(mockData);
+      setLoading(false);
+      return;
+    }
+
     async function fetchShare() {
       try {
         const res = await fetch(`/api/share/${token}`);
         if (!res.ok) {
+          // Fallback to mock for dev preview if API fails (optional, good for design check)
+          const urlParams = new URLSearchParams(window.location.search);
+          if (urlParams.get("mock") === "true") {
+            setData(mockData);
+            setLoading(false);
+            return;
+          }
           const errData = await res.json();
           setError(errData.error || "エラーが発生しました");
           return;
@@ -57,41 +82,19 @@ export default function ShareView({ token }: ShareViewProps) {
 
   if (loading) {
     return (
-      <div style={{
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        height: "100vh",
-        flexDirection: "column",
-        gap: "16px"
-      }}>
-        <div class="animate-spin" style={{
-          width: "40px",
-          height: "40px",
-          border: "4px solid #e0e0e0",
-          borderTopColor: "#1DB446",
-          borderRadius: "50%"
-        }} />
-        <p style={{ color: "#666" }}>読み込み中...</p>
+      <div class="flex flex-col gap-4 items-center justify-center min-h-screen bg-background-muted">
+        <div class="animate-spin w-10 h-10 border-4 border-gray-200 border-t-primary rounded-full"></div>
+        <p class="text-foreground-secondary font-medium">読み込み中...</p>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div style={{
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        height: "100vh",
-        flexDirection: "column",
-        gap: "16px",
-        padding: "20px",
-        textAlign: "center"
-      }}>
-        <div style={{ fontSize: "48px" }}>⚠️</div>
-        <h2 style={{ margin: 0, color: "#333" }}>エラー</h2>
-        <p style={{ color: "#666", margin: 0 }}>{error}</p>
+      <div class="flex flex-col gap-4 items-center justify-center min-h-screen bg-background-muted p-6 text-center">
+        <div class="text-4xl">⚠️</div>
+        <h2 class="text-xl font-bold text-foreground">エラー</h2>
+        <p class="text-foreground-secondary">{error}</p>
       </div>
     );
   }
@@ -102,128 +105,98 @@ export default function ShareView({ token }: ShareViewProps) {
   const daysLeft = Math.ceil((expiryDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
 
   return (
-    <div style={{ padding: "16px", maxWidth: "600px", margin: "0 auto" }}>
-      {/* ヘッダー */}
-      <div style={{
-        background: "linear-gradient(135deg, #1DB446, #17a03d)",
-        color: "white",
-        padding: "20px",
-        borderRadius: "12px",
-        marginBottom: "16px",
-        textAlign: "center"
-      }}>
-        <h1 style={{ margin: "0 0 8px 0", fontSize: "20px" }}>📑 契約台帳</h1>
-        <div style={{ fontSize: "28px", fontWeight: "bold" }}>
-          ¥{data.totalMonthlyCost.toLocaleString()}<span style={{ fontSize: "14px", fontWeight: "normal" }}>/月</span>
-        </div>
-        <div style={{ fontSize: "14px", marginTop: "8px", opacity: 0.9 }}>
-          {data.ledgers.length}件の契約
-        </div>
-      </div>
+    <div class="min-h-screen bg-background-muted font-sans pb-12">
+      <div class="max-w-2xl mx-auto p-4 space-y-4">
 
-      {/* 有効期限警告 */}
-      <div style={{
-        background: daysLeft <= 7 ? "#FFF3E0" : "#E8F5E9",
-        padding: "12px",
-        borderRadius: "8px",
-        marginBottom: "16px",
-        display: "flex",
-        alignItems: "center",
-        gap: "8px"
-      }}>
-        <span>{daysLeft <= 7 ? "⏰" : "✅"}</span>
-        <span style={{ fontSize: "14px", color: daysLeft <= 7 ? "#E65100" : "#2E7D32" }}>
-          {daysLeft > 0
-            ? `このリンクはあと${daysLeft}日有効です`
-            : "このリンクは本日で期限切れです"}
-        </span>
-      </div>
-
-      {/* 注意書き */}
-      <div style={{
-        background: "#FFF8E1",
-        padding: "12px",
-        borderRadius: "8px",
-        marginBottom: "16px",
-        fontSize: "13px",
-        color: "#F57F17"
-      }}>
-        ⚠️ パスワードは含まれていません。安全のため、ID・金額・メモのみ表示しています。
-      </div>
-
-      {/* 台帳リスト */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-        {data.ledgers.map((item) => (
-          <div
-            key={item.id}
-            style={{
-              background: "white",
-              borderRadius: "12px",
-              padding: "16px",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.08)"
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <div style={{
-                  display: "inline-block",
-                  background: "#E3F2FD",
-                  color: "#1565C0",
-                  padding: "2px 8px",
-                  borderRadius: "4px",
-                  fontSize: "11px",
-                  marginBottom: "4px"
-                }}>
-                  {categoryLabels[item.category] || item.category}
-                </div>
-                <h3 style={{ margin: "4px 0", fontSize: "16px", fontWeight: "bold" }}>
-                  {item.service_name}
-                </h3>
-              </div>
-              <div style={{ fontSize: "18px", fontWeight: "bold", color: "#1DB446" }}>
-                {item.monthly_cost ? `¥${item.monthly_cost.toLocaleString()}` : "-"}
-              </div>
-            </div>
-
-            {item.account_identifier && (
-              <div style={{ marginTop: "8px", fontSize: "13px", color: "#666" }}>
-                <span style={{ color: "#999" }}>ID等: </span>
-                {item.account_identifier}
-              </div>
-            )}
-
-            {item.note && (
-              <div style={{
-                marginTop: "8px",
-                fontSize: "13px",
-                color: "#666",
-                background: "#F5F5F5",
-                padding: "8px",
-                borderRadius: "6px"
-              }}>
-                {item.note}
-              </div>
-            )}
-
-            {item.last_confirmed_at && (
-              <div style={{ marginTop: "8px", fontSize: "11px", color: "#999" }}>
-                最終確認: {new Date(item.last_confirmed_at).toLocaleDateString("ja-JP")}
-              </div>
-            )}
+        {/* Header Section */}
+        <div class="bg-white rounded-xl border border-border p-6 text-center shadow-sm">
+          <div class="flex items-center justify-center gap-2 mb-2">
+            <span class="text-2xl">📑</span>
+            <h1 class="text-lg font-bold text-foreground">契約台帳</h1>
           </div>
-        ))}
-      </div>
 
-      {/* フッター */}
-      <div style={{
-        marginTop: "24px",
-        padding: "16px",
-        textAlign: "center",
-        color: "#999",
-        fontSize: "12px"
-      }}>
-        <div>🔗 オヤデキで作成</div>
-        <div style={{ marginTop: "4px" }}>閲覧回数: {data.accessedCount}回</div>
+          <div class="my-4">
+            <div class="text-sm text-foreground-secondary mb-1">月額合計</div>
+            <div class="text-4xl font-bold text-primary tracking-tight">
+              ¥{data.totalMonthlyCost.toLocaleString()}
+            </div>
+          </div>
+
+          <div class="flex justify-center gap-4 text-sm text-foreground-secondary">
+            <div class="flex items-center gap-1">
+              <span class="w-2 h-2 rounded-full bg-primary"></span>
+              {data.ledgers.length}件の契約
+            </div>
+            <div class="flex items-center gap-1">
+              <span class="w-2 h-2 rounded-full bg-gold"></span>
+              閲覧: {data.accessedCount}回
+            </div>
+          </div>
+        </div>
+
+        {/* Alerts */}
+        <div class={`p-3 rounded-lg flex items-center gap-3 border ${daysLeft <= 7 ? 'bg-[#FFF3E0] border-[#FFE0B2] text-[#E65100]' : 'bg-[#E8F5E9] border-[#C8E6C9] text-[#2E7D32]'}`}>
+          <span class="text-lg">{daysLeft <= 7 ? "⏰" : "✅"}</span>
+          <span class="text-sm font-medium">
+            {daysLeft > 0 ? `共有リンクの有効期限: あと${daysLeft}日` : "このリンクは期限切れです"}
+          </span>
+        </div>
+
+        {/* Security Note */}
+        <div class="p-3 bg-blue-50 border border-blue-100 rounded-lg text-xs text-blue-700 flex gap-2">
+          <span>ℹ️</span>
+          <span>パスワードは含まれていません。安全のため、契約内容の一部のみを表示しています。</span>
+        </div>
+
+        {/* Ledger List */}
+        <div class="space-y-3">
+          {data.ledgers.map((item) => (
+            <div key={item.id} class="bg-white rounded-xl border border-border p-5 shadow-sm hover:border-primary transition-colors">
+              <div class="flex justify-between items-start mb-1">
+                <div class="flex flex-col gap-1">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-gray-100 text-gray-600 self-start">
+                    {categoryLabels[item.category] || item.category}
+                  </span>
+                  <h3 class="text-lg font-bold text-foreground leading-tight">
+                    {item.service_name}
+                  </h3>
+                </div>
+                <div class="text-lg font-bold text-primary whitespace-nowrap">
+                  {item.monthly_cost ? `¥${item.monthly_cost.toLocaleString()}` : "-"}
+                </div>
+              </div>
+
+              <div class="mt-3 space-y-2">
+                {item.account_identifier && (
+                  <div class="flex items-start gap-2 text-sm text-foreground">
+                    <span class="text-foreground-muted w-10 shrink-0">ID等</span>
+                    <span class="font-medium break-all">{item.account_identifier}</span>
+                  </div>
+                )}
+
+                {item.note && (
+                  <div class="flex items-start gap-2 text-sm text-foreground">
+                    <span class="text-foreground-muted w-10 shrink-0">メモ</span>
+                    <span class="bg-gray-50 px-2 py-1 rounded text-foreground-secondary flex-1">
+                      {item.note}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {item.last_confirmed_at && (
+                <div class="mt-3 pt-3 border-t border-gray-100 flex justify-end text-xs text-foreground-muted">
+                  最終確認: {new Date(item.last_confirmed_at).toLocaleDateString("ja-JP")}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div class="mt-8 text-center">
+          <p class="text-xs text-foreground-muted">Powered by Oyadeki</p>
+        </div>
+
       </div>
     </div>
   );

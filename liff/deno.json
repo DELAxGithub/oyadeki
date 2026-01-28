@@ -28,7 +28,10 @@
     "@preact/signals-core": "https://esm.sh/*@preact/signals-core@1.5.1",
     "$std/": "https://deno.land/std@0.216.0/",
     "@line/liff": "https://esm.sh/@line/liff@2.24.0",
-    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.39.7"
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.39.7",
+    "tailwindcss": "npm:tailwindcss@3.4.1",
+    "tailwindcss/": "npm:tailwindcss@3.4.1/",
+    "tailwindcss/plugin": "npm:tailwindcss@3.4.1/plugin.js"
   },
   "compilerOptions": {
     "jsx": "react-jsx",

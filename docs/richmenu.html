@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oyadeki Rich Menu</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f0f0f0;
+            font-family: "Noto Sans JP", sans-serif;
+        }
+        .container {
+            width: 1200px;
+            height: 810px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 2px;
+            background-color: #D4AF37; /* Border Color (Gold) */
+            box-sizing: border-box;
+            border: 2px solid #D4AF37;
+        }
+        .menu-item {
+            background-color: #FFFFFF;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        .icon {
+            font-size: 100px;
+            margin-bottom: 20px;
+        }
+        .label {
+            font-size: 60px;
+            font-weight: bold;
+            color: #06C755; /* LINE Green */
+        }
+        .sub-label {
+            font-size: 24px;
+            color: #888888;
+            margin-top: 10px;
+        }
+
+        /* Icons (Simple CSS Shapes or Emoji for simplicity in screenshot) */
+    </style>
+</head>
+<body>
+
+<div class="container" id="capture">
+    <!-- Top Left -->
+    <div class="menu-item">
+        <div class="icon">🚑</div>
+        <div class="label">救急箱</div>
+        <div class="sub-label">困ったときはココ</div>
+    </div>
+    <!-- Top Right -->
+    <div class="menu-item">
+        <div class="icon">📑</div>
+        <div class="label">契約台帳</div>
+        <div class="sub-label">契約書・ハガキ</div>
+    </div>
+    <!-- Bottom Left -->
+    <div class="menu-item">
+        <div class="icon">📺</div>
+        <div class="label">見たもの</div>
+        <div class="sub-label">テレビ・映画</div>
+    </div>
+    <!-- Bottom Right -->
+    <div class="menu-item">
+        <div class="icon">📦</div>
+        <div class="label">売る</div>
+        <div class="sub-label">メルカリ出品</div>
+    </div>
+</div>
+
+</body>
+</html>

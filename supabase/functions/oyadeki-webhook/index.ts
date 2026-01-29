@@ -3,7 +3,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { verifySignature } from "../_shared/line-signature.ts";
 import { isDuplicate } from "../_shared/dedup.ts";
 import { logUsage, getUserContext, UserContext } from "../_shared/supabase-client.ts";
-import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, generateListing, ListingInfo } from "../_shared/gemini-client.ts";
+import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, chatWithContext } from "../_shared/gemini-client.ts";
 import { getSupabaseClient } from "../_shared/supabase-client.ts";
 
 const LINE_API_BASE = "https://api.line.me/v2/bot";
@@ -592,7 +592,7 @@ function buildMediaConfirmFlexMessage(media: MediaInfo, messageId: string) {
     flex: 1,
     action: {
       type: "postback",
-      label: "⭐".repeat(star),
+      label: `${star} ⭐`,
       data: `action=rate_media&msgId=${messageId}&type=${media.media_type}&title=${encodeURIComponent(media.title.substring(0, 30))}&sub=${encodeURIComponent((media.subtitle || "").substring(0, 20))}&cast=${encodeURIComponent((media.artist_or_cast || "").substring(0, 20))}&year=${media.year || 0}&rating=${star}`,
     },
   }));
@@ -611,6 +611,7 @@ function buildMediaConfirmFlexMessage(media: MediaInfo, messageId: string) {
           { type: "text", text: `${media.title} ${subtitleText}`, weight: "bold", size: "xl", wrap: true },
           ...(castText ? [{ type: "text", text: castText, size: "sm", color: "#666666", wrap: true }] : []),
           ...(yearText ? [{ type: "text", text: yearText, size: "xs", color: "#888888" }] : []),
+          ...(media.trivia ? [{ type: "text", text: `💡 ${media.trivia}`, size: "sm", color: "#444444", wrap: true, margin: "md", backgroundColor: "#f0f8ff", paddingAll: "sm", cornerRadius: "md" }] : []),
           { type: "separator", margin: "md" },
           { type: "text", text: "⭐ 評価をつけてください", size: "sm", margin: "md" },
         ],
@@ -793,19 +794,85 @@ function buildGroupShareMessage(items: any[], shareUrl: string, expiresAt: Date)
 /**
  * 出品モードかどうかを確認（5分以内にsell_mode_startがあるか）
  */
+/**
+ * 出品モードかどうかを確認（直近のアクションがsell_mode_startで、かつ5分以内か）
+ */
 async function isInSellMode(userId: string): Promise<boolean> {
   const supabase = getSupabaseClient();
   const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
   const { data } = await supabase
     .from("usage_logs")
-    .select("id")
+    .select("action_type, created_at")
     .eq("line_user_id", userId)
-    .eq("action_type", "sell_mode_start")
-    .gte("created_at", fiveMinutesAgo)
-    .limit(1);
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  return (data?.length ?? 0) > 0;
+  if (!data) return false;
+
+  // 直近のアクションが出品モード開始で、かつ5分以内であれば有効
+  return data.action_type === "sell_mode_start" && data.created_at >= fiveMinutesAgo;
+}
+
+/**
+ * 進行中の出品取引を取得
+ */
+async function getActiveSellItem(userId: string) {
+  const supabase = getSupabaseClient();
+  const { data } = await supabase
+    .from("sell_items")
+    .select("*")
+    .eq("line_user_id", userId)
+    .in("status", ["analyzing", "questioning"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data;
+}
+
+/**
+ * 出品取引を更新
+ */
+async function updateSellItem(id: string, updates: any) {
+  const supabase = getSupabaseClient();
+  await supabase.from("sell_items").update(updates).eq("id", id);
+}
+
+/**
+ * 直近のメディアログ取得（コンテキスト会話用）
+ */
+async function getRecentMediaLog(userId: string) {
+  const supabase = getSupabaseClient();
+  // 30分以内のログを検索
+  const timeLimit = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const { data } = await supabase
+    .from("media_logs")
+    .select("*")
+    .eq("line_user_id", userId)
+    .gt("created_at", timeLimit)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data;
+}
+
+/**
+ * 直近の出品完了アイテム取得（コンテキスト会話用）
+ */
+async function getRecentCompletedSellItem(userId: string) {
+  const supabase = getSupabaseClient();
+  const timeLimit = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const { data } = await supabase
+    .from("sell_items")
+    .select("*")
+    .eq("line_user_id", userId)
+    .eq("status", "completed")
+    .gt("updated_at", timeLimit)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data;
 }
 
 /**
@@ -1020,7 +1087,7 @@ async function handleMessageEvent(event: LineEvent) {
             text: "⚽️ オヤデキの使い方 ⚽️\n\n" +
               "【困った時（VAR判定）】\n📷 スマホ画面のスクショを送ってね！\n→ 詐欺かどうか／操作方法を解説するよ！\n\n" +
               "【見たものを記録（メディアログ）】\n📺 テレビや映画の画面を送ってね！\n→ 番組を特定して記録するよ\n→「見た」で履歴が見られるよ\n\n" +
-              "【メルカリ出品（パス出し）】\n📦「売る」と送ってから商品の写真を送ってね！\n→ タイトルと説明文を作るよ\n\n" +
+              "【メルカリ出品（パス出し）】\n📦「売る」と送ってから商品の写真を送ってね！\n→ AI店員が詳しく質問するよ（対話モード）\n\n" +
               "【コマンド一覧】\n「台帳」「見た」「売る」「使い方」",
           },
           {
@@ -1031,6 +1098,102 @@ async function handleMessageEvent(event: LineEvent) {
               "撮ったらそのまま送ってね！",
           },
         ]);
+        return;
+      }
+
+      // ==================== 出品対話モード処理 ====================
+      const activeSellItem = await getActiveSellItem(userId);
+
+      if (activeSellItem) {
+        // キャンセル処理
+        if (lowerText === "キャンセル" || lowerText === "やめる" || lowerText === "終了") {
+          await updateSellItem(activeSellItem.id, { status: "cancelled" });
+          await replyMessage(replyToken, [{ type: "text", text: "出品モードを終了しました。" }]);
+          return;
+        }
+
+        console.log("Continuing selling dialogue for item:", activeSellItem.id);
+
+        // ユーザーの回答を履歴に追加
+        const history = (activeSellItem.dialogue_history || []) as { role: string; text: string }[];
+        history.push({ role: "user", text: message.text });
+
+        // Geminiで次のステップを生成
+        const nextState = await continueSellingDialogue(
+          activeSellItem.extracted_info,
+          activeSellItem.image_summary || "",
+          history,
+          message.text
+        );
+
+        if (nextState) {
+          // 履歴にAIの応答を追加（質問または完了メッセージ）
+          const aiReplyText = nextState.is_sufficient
+            ? "ありがとうございます！出品文を作成しました。"
+            : (nextState.next_question || "詳細を教えてください。");
+
+          history.push({ role: "assistant", text: aiReplyText });
+
+          // DB更新
+          await updateSellItem(activeSellItem.id, {
+            extracted_info: nextState.extracted_info,
+            dialogue_history: history,
+            status: nextState.is_sufficient ? "completed" : "questioning"
+          });
+
+          if (nextState.is_sufficient && nextState.listing) {
+            // 完了 -> 出品文送信
+            await replyMessage(replyToken, [
+              { type: "text", text: "聞き取りありがとうございました！\nこちらで出品文を作成しました👇" },
+              buildListingFlexMessage(nextState.listing),
+              { type: "text", text: nextState.listing.title },
+              { type: "text", text: nextState.listing.description },
+              { type: "text", text: "↑ 上の吹き出しを長押しするとコピーできます！" }
+            ]);
+          } else {
+            // 継続 -> 質問送信
+            await replyMessage(replyToken, [{ type: "text", text: nextState.next_question || "情報を教えてください。" }]);
+          }
+        } else {
+          await replyMessage(replyToken, [{ type: "text", text: "すみません、うまく処理できませんでした。もう一度教えてください。" }]);
+        }
+        return;
+      }
+
+
+
+      // ==================== コンテキスト会話（見た感想戦 & 売る感想戦） ====================
+      // 明示的なコマンドではなく、かつ出品モードでもない場合
+
+      // 1. 直近の出品完了アイテムがあるか？（完了後の「いくらで売れる？」などに対応）
+      const recentSellItem = await getRecentCompletedSellItem(userId);
+      if (recentSellItem) {
+        console.log("Found recent sell item context:", recentSellItem.image_summary);
+        await logUsage(userId, "sell_chat", { id: recentSellItem.id });
+
+        // 出品アイテム情報をコンテキスト用に整形
+        const itemContext = {
+          title: recentSellItem.extracted_info?.product_name || "商品",
+          media_type: "item", // 便宜上
+          trivia: `この商品の特徴: ${JSON.stringify(recentSellItem.extracted_info || {})}. ユーザーの質問には、出品の補足情報や相場感などを答えてあげてください。`
+        };
+
+        const replyText = await chatWithContext(message.text || "", "media", itemContext as any);
+        await replyMessage(replyToken, [{ type: "text", text: replyText }]);
+        return;
+      }
+
+      // 2. 直近のメディアログがあるか？
+      const recentMedia = await getRecentMediaLog(userId);
+      if (recentMedia) {
+        // 直近30分以内にメディアを見ている -> その話をしたい可能性が高い
+        // ただし挨拶などは除外したいが、Geminiに任せる
+        console.log("Found recent media context:", recentMedia.title);
+
+        await logUsage(userId, "media_chat", { title: recentMedia.title });
+        const replyText = await chatWithContext(message.text || "", "media", recentMedia);
+
+        await replyMessage(replyToken, [{ type: "text", text: replyText }]);
         return;
       }
 
@@ -1077,17 +1240,62 @@ async function handleMessageEvent(event: LineEvent) {
         console.log("Image fetched, size:", base64.length, "mimeType:", mimeType);
 
         // ==================== 出品モードチェック ====================
-        const sellMode = await isInSellMode(userId);
-        if (sellMode) {
-          console.log("User is in sell mode, generating listing...");
-          const listing = await generateListing(base64, mimeType);
 
-          if (listing) {
-            await logUsage(userId, "listing_generate", {
-              title: listing.title,
-              latency_ms: Date.now() - startTime,
+        // 既存の「5分以内」ルールは、初期画像送信のトリガーとしてのみ使用
+        // すでに会話中の場合は、画像を送っても「新しい出品」として扱うか、
+        // あるいは「追加画像」として扱うかが問題だが、
+        // ここではシンプルに「会話中でも画像が来たら新しい出品解析スタート」とする（リセット）
+
+        const isSellModeStart = await isInSellMode(userId); // "売る" と言ってから5分以内
+
+        if (isSellModeStart) {
+          console.log("Sell mode image received. Starting interactive analysis...");
+
+          // LINEの仕様上、replyTokenは1回のみ有効。
+          // 先にメッセージを送ると結果を送れなくなるため、何も送らず解析を待つ。
+          const analysis = await analyzeProductImage(base64, mimeType);
+
+          if (analysis) {
+            // DBに保存
+            const supabase = getSupabaseClient();
+
+            // 既存の進行中があればキャンセル扱いに
+            const activeItem = await getActiveSellItem(userId);
+            if (activeItem) {
+              await updateSellItem(activeItem.id, { status: "cancelled" });
+            }
+
+            const dialogueHistory = [
+              { role: "assistant", text: analysis.next_question || "これは何ですか？" }
+            ];
+
+            await supabase.from("sell_items").insert({
+              line_user_id: userId,
+              status: "questioning",
+              image_summary: analysis.image_summary,
+              extracted_info: analysis.extracted_info,
+              dialogue_history: dialogueHistory
             });
-            await replyMessage(replyToken, [buildListingFlexMessage(listing)]);
+
+            await logUsage(userId, "sell_dialogue_start", {
+              product: analysis.extracted_info.product_name
+            });
+
+            // 最初の質問を送信 (pushメッセージが必要だが、replyTokenは1回しか使えないため、ローディングメッセージを送ってしまった場合はアウト)
+            // LINEの仕様上、replyTokenは1往復のみ。
+            // 先に "画像を解析しています..." を送ってしまうと、結果を送れない。
+            // したがって、解析メッセージは送らず、少し待たせてから結果を送るのが正解。
+            // または Loading Animation API を使う。
+            // ここではシンプルにするため、上の "解析しています" を削除し、いきなり結果を送る。
+
+            // Re-implement without early reply:
+            await replyMessage(replyToken, [
+              {
+                type: "text",
+                text: analysis.next_question || "商品の詳細を教えてください。"
+              }
+            ]);
+
           } else {
             await replyMessage(replyToken, [{
               type: "text",
@@ -1123,6 +1331,21 @@ async function handleMessageEvent(event: LineEvent) {
             console.log("Media not identified, falling back to help flow");
             await handleHelpImageFlow(replyToken, userId, base64, mimeType, message.id, userContext, startTime);
           }
+        } else if (intent === "sell") {
+          // ==================== 出品提案フロー ====================
+          // 商品っぽいが、"売る"と言っていない場合 -> 確認する
+          await replyMessage(replyToken, [{
+            type: "template",
+            altText: "出品しますか？",
+            template: {
+              type: "confirm",
+              text: "これは商品ですか？\n出品用のタイトルと説明文を作成しますか？",
+              actions: [
+                { type: "message", label: "はい、出品する", text: "売る" },
+                { type: "message", label: "いいえ", text: "いいえ" }
+              ]
+            }
+          }]);
         } else {
           // ==================== 救急箱フロー（既存） ====================
           await handleHelpImageFlow(replyToken, userId, base64, mimeType, message.id, userContext, startTime);

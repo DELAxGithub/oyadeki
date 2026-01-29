@@ -107,6 +107,58 @@
 
 **✅ デプロイ完了**: 2026-01-27
 
+### ✅ フェーズ4: UI刷新 & デザイン適用 (1/28)
+>ゲート: Pencilデザインシステムによる統一感のあるUI/UX。
+
+- [x] デザインシステム定義: Pencil (`oyadeki.pen`) 作成 - **完了**
+- [x] LIFF刷新: 設定画面・シェア画面のカードUI化 - **完了**
+- [x] Flex Message刷新: Green & Gold配色、警告色調整 - **完了**
+- [x] 全体デプロイ: Supabase & Deno Deploy - **完了**
+
+### 🚀 フェーズ5: 初期設定 & ソフトローンチ (2/1〜)
+> ゲート: 本番環境での動作確認 → 家族への展開。
+
+- [ ] **初期設定 (Secrets & Webhook)**: ← **イマココ**
+- [ ] 動作確認 (自分のみ): 全機能を実機でテスト
+- [ ] ソフトローンチ: 家族1名を招待して1週間運用
+- [ ] 本番運用開始
+
+---
+
+## 🛠️ 初期設定ガイド (Setup Guide)
+
+本番運用を開始するためのステップです。
+
+### 1. 環境変数の設定 (Supabase Secrets)
+以下のコマンドを実行して、本番環境にAPIキーなどを設定してください。
+
+```bash
+npx supabase secrets set \
+  LINE_CHANNEL_ACCESS_TOKEN="あなたのチャンネルアクセストークン" \
+  LINE_CHANNEL_SECRET="あなたのチャンネルシークレット" \
+  GEMINI_API_KEY="AIのAPIキー"
+```
+
+### 2. LINE Developers設定
+LINE Developersコンソールにて以下を設定してください。
+
+*   **Webhook URL**:
+    `https://xnzlfpzecupaoilinddx.supabase.co/functions/v1/oyadeki-webhook`
+    *   "Use webhook" をONにする。
+*   **LIFF Endpoint URL**:
+    `https://oyadeki.deno.dev` (または実際のDeno Deploy URL)
+
+### 3. 本番運用のタイミング
+以下のステップでの段階的リリースを推奨します。
+
+1.  **Developer Test (即日)**:
+    *   設定後、すぐに自分のLINEアカウントで「使い方の確認」「画像の投稿」などを試す。
+2.  **Soft Launch (週末)**:
+    *   家族1人（信頼できる相手）とグループを作り、招待する。
+    *   1週間ほど運用し、Botの反応速度や誤爆がないか確認。
+3.  **Grand Open**:
+    *   問題なければ他の家族も招待。
+
 ---
 
 ## 環境情報
@@ -117,18 +169,11 @@
 
 ### LINE
 - LIFF ID: `2008909268-tE6zSm0T`
-- LIFF URL: `https://oyadeki-liff.deno.dev/settings`
 - Webhook URL: `https://xnzlfpzecupaoilinddx.supabase.co/functions/v1/oyadeki-webhook`
 
 ### Deno Deploy (LIFF)
-- URL: https://oyadeki-liff.deno.dev
-
-### デプロイコマンド
-```bash
-# Edge Function
-npx supabase functions deploy oyadeki-webhook --no-verify-jwt
-```
+- URL: https://oyadeki.deno.dev (要確認)
 
 ---
 
-*最終更新: 2026-01-27 (v5 - W6.5出品サポート完了)*
+*最終更新: 2026-01-28 (v6 - デザイン適用・初期設定ガイド追加)*

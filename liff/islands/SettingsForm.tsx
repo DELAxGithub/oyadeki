@@ -80,15 +80,18 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
 
       {/* Section: Personality */}
       <div class="pt-6">
-        <h2 class="px-4 pb-2 text-xs text-gray-500 uppercase font-medium">Botの人格設定</h2>
+        <h2 class="px-4 pb-2 text-xs text-gray-500 uppercase font-medium">
+          Botの人格設定
+        </h2>
         <div class="bg-white border-y border-gray-200">
-
           <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 last:border-0 pl-4">
             <span class="text-base text-gray-900">趣味のテーマ</span>
             <input
               type="text"
               value={metaphorTheme.value}
-              onInput={(e) => (metaphorTheme.value = (e.target as HTMLInputElement).value)}
+              onInput={(
+                e,
+              ) => (metaphorTheme.value = (e.target as HTMLInputElement).value)}
               class="text-right text-gray-600 bg-transparent focus:outline-none w-1/2"
               placeholder="例: ツェーゲン金沢"
             />
@@ -100,10 +103,14 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
               <input
                 type="checkbox"
                 checked={metaphorEnabled.value}
-                onChange={(e) => (metaphorEnabled.value = (e.target as HTMLInputElement).checked)}
+                onChange={(
+                  e,
+                ) => (metaphorEnabled.value =
+                  (e.target as HTMLInputElement).checked)}
                 class="sr-only peer"
               />
-              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#06C755]"></div>
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#06C755]">
+              </div>
             </label>
           </div>
 
@@ -112,7 +119,9 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
             <div class="relative">
               <select
                 value={tone.value}
-                onChange={(e) => (tone.value = (e.target as HTMLSelectElement).value)}
+                onChange={(
+                  e,
+                ) => (tone.value = (e.target as HTMLSelectElement).value)}
                 class="appearance-none bg-transparent text-gray-600 pr-6 text-right focus:outline-none"
               >
                 <option value="polite">丁寧</option>
@@ -120,7 +129,13 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
                 <option value="warm">温かみのある</option>
               </select>
               <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center text-gray-400">
-                <svg class="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" /></svg>
+                <svg
+                  class="fill-current h-4 w-4"
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 20 20"
+                >
+                  <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
+                </svg>
               </div>
             </div>
           </div>
@@ -129,16 +144,22 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
 
       {/* Section: Constraints */}
       <div class="pt-6">
-        <h2 class="px-4 pb-2 text-xs text-gray-500 uppercase font-medium">禁止ワード</h2>
+        <h2 class="px-4 pb-2 text-xs text-gray-500 uppercase font-medium">
+          禁止ワード
+        </h2>
         <div class="bg-white border-y border-gray-200 p-4">
           <input
             type="text"
             value={dislikedPhrases.value}
-            onInput={(e) => (dislikedPhrases.value = (e.target as HTMLInputElement).value)}
+            onInput={(
+              e,
+            ) => (dislikedPhrases.value = (e.target as HTMLInputElement).value)}
             class="w-full text-base text-gray-900 focus:outline-none placeholder-gray-400"
             placeholder="例: 頑張って, 大丈夫"
           />
-          <p class="mt-2 text-xs text-gray-400">カンマ区切りで入力してください。</p>
+          <p class="mt-2 text-xs text-gray-400">
+            カンマ区切りで入力してください。
+          </p>
         </div>
       </div>
 
@@ -148,11 +169,15 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
           <input
             type="checkbox"
             checked={consented.value}
-            onChange={(e) => (consented.value = (e.target as HTMLInputElement).checked)}
+            onChange={(
+              e,
+            ) => (consented.value = (e.target as HTMLInputElement).checked)}
             class="w-5 h-5 mt-0.5 text-[#06C755] border-gray-300 rounded focus:ring-[#06C755]"
           />
           <span class="text-sm text-gray-500 leading-relaxed">
-            <a href="#" class="underline text-blue-600">プライバシーポリシー</a>に同意し、
+            <a href="#" class="underline text-blue-600">
+              プライバシーポリシー
+            </a>に同意し、
             私の入力したデータが親子間のコミュニケーション支援のために使用されることを承諾します。
           </span>
         </label>

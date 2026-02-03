@@ -1,4 +1,3 @@
-
 export default function DevDashboard() {
   return (
     <div class="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4">
@@ -11,8 +10,12 @@ export default function DevDashboard() {
             alt="Oyadeki Logo"
             class="mx-auto mb-4"
           />
-          <h1 class="text-2xl font-bold text-gray-800">オヤデキ Dev Dashboard</h1>
-          <p class="text-gray-500 mt-2">Chrome開発用ポータル (Tailwind Enabled)</p>
+          <h1 class="text-2xl font-bold text-gray-800">
+            オヤデキ Dev Dashboard
+          </h1>
+          <p class="text-gray-500 mt-2">
+            Chrome開発用ポータル (Tailwind Enabled)
+          </p>
         </div>
 
         <div class="space-y-4">

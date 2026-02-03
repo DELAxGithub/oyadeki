@@ -35,7 +35,7 @@ export interface UserContext {
  * ユーザー設定を取得
  */
 export async function getUserContext(
-  lineUserId: string
+  lineUserId: string,
 ): Promise<UserContext | null> {
   const supabase = getSupabase();
   const { data, error } = await supabase
@@ -56,7 +56,7 @@ export async function getUserContext(
  */
 export async function updateUserContext(
   lineUserId: string,
-  updates: Partial<UserContext>
+  updates: Partial<UserContext>,
 ): Promise<boolean> {
   const supabase = getSupabase();
   const { error } = await supabase

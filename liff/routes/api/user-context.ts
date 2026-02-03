@@ -64,7 +64,7 @@ export const handler: Handlers = {
       .from("user_contexts")
       .upsert(
         { line_user_id, ...updates },
-        { onConflict: "line_user_id" }
+        { onConflict: "line_user_id" },
       );
 
     if (error) {

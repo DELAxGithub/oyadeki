@@ -33,7 +33,8 @@ export default function LiffApp({ liffId }: LiffAppProps) {
 
         // LIFF SDKを動的にインポート
         const { liff } = window as any; // Use global or import if available
-        const liffModule = (await import("https://esm.sh/@line/liff@2.24.0")).default;
+        const liffModule =
+          (await import("https://esm.sh/@line/liff@2.24.0")).default;
 
         await liffModule.init({ liffId });
 
@@ -63,7 +64,8 @@ export default function LiffApp({ liffId }: LiffAppProps) {
     return (
       <div class="flex items-center justify-center min-h-screen bg-gray-50">
         <div class="text-center">
-          <div class="animate-spin w-10 h-10 border-4 border-[#06C755] border-t-transparent rounded-full mx-auto mb-4"></div>
+          <div class="animate-spin w-10 h-10 border-4 border-[#06C755] border-t-transparent rounded-full mx-auto mb-4">
+          </div>
           <p class="text-gray-600 font-medium">読み込み中...</p>
         </div>
       </div>

@@ -271,35 +271,52 @@ export interface MediaInfo {
 /**
  * 画像からメディア情報を識別
  */
+export interface MediaDialogueState {
+    visual_clues: string;    // 見えているもの（人、背景、文字など）
+    question: string;        // ユーザーへの絞り込み質問
+    media_candidate?: MediaInfo; // もし候補があれば
+}
+
+export type IdentifyMediaResult = MediaInfo | MediaDialogueState | null;
+
+/**
+ * 画像からメディア情報を識別（対話対応版）
+ */
 export async function identifyMedia(
     imageBase64: string,
     mimeType: string
-): Promise<MediaInfo | null> {
+): Promise<IdentifyMediaResult> {
     const prompt = `この画像に映っているメディア（番組・映画・スポーツ・音楽など）を特定してください。
+特定できない場合は、ユーザーに質問するための情報を抽出してください。
 
 【出力形式 - JSONのみ】
+以下のいずれかの形式で返してください。
+
+パターンA：作品が特定できた場合
 {
-  "media_type": "movie" | "tv_show" | "sports" | "music" | "book" | "other",
-  "title": "タイトル名",
-  "subtitle": "エピソード名や対戦カードなど（あれば）",
-  "artist_or_cast": "出演者・アーティスト・チーム名",
-  "year": 2024（公開年・放送年、わかれば数値で）,
-  "trivia": "この作品に関する短い豆知識や見どころ、受賞歴などを1〜2文で。親世代が興味を持ちそうな内容が良いです。"
+  "identified": true,
+  "data": {
+    "media_type": "movie" | "tv_show" | "sports" | "music" | "book" | "other",
+    "title": "タイトル名",
+    "subtitle": "エピソード名や対戦カードなど（あれば）",
+    "artist_or_cast": "出演者・アーティスト・チーム名",
+    "year": 2024,
+    "trivia": "この作品に関する短い豆知識や見どころ（1〜2文）"
+  }
+}
+
+パターンB：特定できないため、質問する場合
+{
+  "identified": false,
+  "visual_clues": "画像から読み取れる視覚情報（例：和服の男性が映っている、右上にNHKのロゴがある、xxという文字が見える）",
+  "question": "作品を絞り込むための親切な質問（例：「これは時代劇のようですね。NHKの大河ドラマですか？」、「マツコさんが映っていますが、バラエティ番組ですか？」）"
 }
 
 【判定ガイド】
-- テレビ番組（ニュース、ドラマ、バラエティ） → tv_show
-- 映画（映画館、映画ポスター、配信映画） → movie
-- スポーツ中継（野球、サッカー、相撲など） → sports
-- 音楽番組、ライブ、CDジャケット → music
-- 本の表紙、読書画面 → book
-- それ以外 → other
+- 確信度が低い場合は、無理に特定せずパターンBを選んでください。
+- アニメの場合は、キャラクターの特徴（服装、髪型、メカなど）から具体的な作品名（例：ガンダム、ジブリなど）を推測し、質問に含めてください。
+- 質問は「はい/いいえ」または短い単語で答えられるものが望ましいです。
 
-【例】
-- 大河ドラマの画面 → {"media_type": "tv_show", "title": "光る君へ", "subtitle": "第15話", "artist_or_cast": "吉高由里子", "year": 2024, "trivia": "平安時代の衣装は「十二単」と呼ばれ、総重量は20kgにもなったそうです。"}
-- サッカー中継 → {"media_type": "sports", "title": "天皇杯決勝", "subtitle": "浦和レッズ vs 名古屋", "artist_or_cast": null, "year": 2024, "trivia": "天皇杯は日本最古のサッカートーナメントで、プロアマ問わず参加できるのが特徴です。"}
-
-特定できない場合は null を返してください。
 JSONのみを返し、Markdownコードブロックは不要です。`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
@@ -320,14 +337,14 @@ JSONのみを返し、Markdownコードブロックは不要です。`;
             ],
             generationConfig: {
                 response_mime_type: "application/json",
-                temperature: 0.3,
+                temperature: 0.4,
             },
         }),
     });
 
     if (!response.ok) {
         console.error("identifyMedia failed:", response.status);
-        return null;
+        return null; // APIエラー時はnull
     }
 
     const data = await response.json();
@@ -335,12 +352,89 @@ JSONのみを返し、Markdownコードブロックは不要です。`;
 
     try {
         const parsed = JSON.parse(jsonText);
-        if (parsed && parsed.title) {
-            return parsed as MediaInfo;
+        if (parsed.identified && parsed.data && parsed.data.title) {
+            return parsed.data as MediaInfo;
+        } else if (!parsed.identified && parsed.question) {
+            return {
+                visual_clues: parsed.visual_clues || "情報不足",
+                question: parsed.question,
+            } as MediaDialogueState;
         }
         return null;
     } catch (e) {
         console.error("Failed to parse media JSON:", e);
+        return null;
+    }
+}
+
+/**
+ * 3. メディア特定対話の継続
+ * ユーザーの回答をヒントに再特定を試みる
+ */
+export async function continueMediaDialogue(
+    visualClues: string,
+    dialogueHistory: { role: string; text: string }[],
+    userReply: string
+): Promise<IdentifyMediaResult> {
+    const prompt = `あなたは不明なメディア作品を特定するアシスタントです。
+画像の視覚情報と、ユーザーとの対話履歴をもとに、作品名を特定してください。
+
+【現状の情報】
+視覚情報: ${visualClues}
+会話履歴: ${JSON.stringify(dialogueHistory.slice(-4))}
+ユーザーの最新の回答: "${userReply}"
+
+【タスク】
+1. ユーザーの回答をヒントに、具体的な作品名を推測してください。
+2. もし確定できなければ、すぐにあきらめず、「パターンB」で別の角度から質問を続けてください。
+3. ユーザーが「わからない」「知らない」と答えた場合は、より一般的な特徴（ジャンル、雰囲気、放送局など）を聞いてください。
+
+【出力形式 - JSONのみ】
+パターンA：特定できた場合（確信度が高い場合のみ）
+{
+  "identified": true,
+  "data": { "media_type": "...", "title": "...", "subtitle": "...", "artist_or_cast": "...", "year": ..., "trivia": "..." }
+}
+
+パターンB：まだ特定できない場合（少しでも不明点があればこちら）
+{
+  "identified": false,
+  "visual_clues": "${visualClues}", 
+  "question": "推測を深めるための質問（例：『主役の俳優は誰ですか？』『どのチャンネルで放送していますか？』）"
+}
+
+JSONのみを返してください。`;
+
+    const apiKey = Deno.env.get("GEMINI_API_KEY")!;
+    const model = "gemini-2.0-flash";
+    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { response_mime_type: "application/json", temperature: 0.4 },
+        }),
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "null";
+
+    try {
+        const parsed = JSON.parse(jsonText);
+        if (parsed.identified && parsed.data && parsed.data.title) {
+            return parsed.data as MediaInfo;
+        } else if (!parsed.identified && parsed.question) {
+            return {
+                visual_clues: parsed.visual_clues || visualClues,
+                question: parsed.question,
+            } as MediaDialogueState;
+        }
+        return null;
+    } catch (e) {
         return null;
     }
 }

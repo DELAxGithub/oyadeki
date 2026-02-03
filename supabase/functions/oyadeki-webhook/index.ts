@@ -3,7 +3,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { verifySignature } from "../_shared/line-signature.ts";
 import { isDuplicate } from "../_shared/dedup.ts";
 import { logUsage, getUserContext, UserContext } from "../_shared/supabase-client.ts";
-import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, chatWithContext } from "../_shared/gemini-client.ts";
+import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, MediaDialogueState, IdentifyMediaResult, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, continueMediaDialogue, chatWithContext } from "../_shared/gemini-client.ts";
 import { getSupabaseClient } from "../_shared/supabase-client.ts";
 
 const LINE_API_BASE = "https://api.line.me/v2/bot";
@@ -1012,25 +1012,24 @@ async function handleMessageEvent(event: LineEvent) {
       }
 
       // メディアログ閲覧
+      // メディアログ (見たものモード)
       if (lowerText === "見た" || lowerText === "見たもの" || lowerText === "メディアログ" || lowerText === "視聴記録") {
-        console.log("Fetching media logs for user:", userId);
-        const supabase = getSupabaseClient();
+        await logUsage(userId, "media_mode_trigger", {});
 
-        const { data: items, error } = await supabase
-          .from("media_logs")
-          .select("*")
-          .eq("line_user_id", userId)
-          .order("watched_at", { ascending: false })
-          .limit(20);
-
-        if (error) {
-          console.error("Media logs fetch error:", error);
-          await replyMessage(replyToken, [{ type: "text", text: "エラーが発生しました。時間をおいて試してください。" }]);
-          return;
-        }
-
-        await logUsage(userId, "media_list", { count: items?.length || 0 });
-        await replyMessage(replyToken, [buildMediaListFlexMessage(items || [])]);
+        await replyMessage(replyToken, [{
+          type: "template",
+          altText: "何を見ていますか？",
+          template: {
+            type: "buttons",
+            title: "📺 視聴記録モード",
+            text: "今見ているテレビや映画の画面を\n写真で送ってください！\n作品名を記録します。",
+            actions: [
+              { type: "cameraRoll", label: "ライブラリから写真を選ぶ" },
+              { type: "camera", label: "カメラで撮る" },
+              { type: "postback", label: "📖 これまでの記録を見る", data: "action=view_media_history" }
+            ]
+          }
+        }]);
         return;
       }
 
@@ -1101,65 +1100,140 @@ async function handleMessageEvent(event: LineEvent) {
         return;
       }
 
-      // ==================== 出品対話モード処理 ====================
+      // ==================== 出品対話 & メディア対話モード処理 ====================
       const activeSellItem = await getActiveSellItem(userId);
 
       if (activeSellItem) {
         // キャンセル処理
         if (lowerText === "キャンセル" || lowerText === "やめる" || lowerText === "終了") {
           await updateSellItem(activeSellItem.id, { status: "cancelled" });
-          await replyMessage(replyToken, [{ type: "text", text: "出品モードを終了しました。" }]);
+          await replyMessage(replyToken, [{ type: "text", text: "対話モードを終了しました。" }]);
           return;
         }
 
-        console.log("Continuing selling dialogue for item:", activeSellItem.id);
+        // extracted_info の type でモード分岐
+        const info = activeSellItem.extracted_info as any;
 
-        // ユーザーの回答を履歴に追加
-        const history = (activeSellItem.dialogue_history || []) as { role: string; text: string }[];
-        history.push({ role: "user", text: message.text });
+        if (info && info.type === "media_dialogue") {
+          // -------- メディア対話 --------
+          console.log("Continuing media dialogue for item:", activeSellItem.id);
 
-        // Geminiで次のステップを生成
-        const nextState = await continueSellingDialogue(
-          activeSellItem.extracted_info,
-          activeSellItem.image_summary || "",
-          history,
-          message.text
-        );
+          // ユーザーの回答を履歴に追加
+          const history = (activeSellItem.dialogue_history || []) as { role: string; text: string }[];
+          history.push({ role: "user", text: message.text });
 
-        if (nextState) {
-          // 履歴にAIの応答を追加（質問または完了メッセージ）
-          const aiReplyText = nextState.is_sufficient
-            ? "ありがとうございます！出品文を作成しました。"
-            : (nextState.next_question || "詳細を教えてください。");
+          // Geminiで再特定
+          const result = await continueMediaDialogue(
+            info.visual_clues || "",
+            history,
+            message.text
+          );
 
-          history.push({ role: "assistant", text: aiReplyText });
+          if (result) {
+            if ("visual_clues" in result) {
+              // まだ特定できず、次の質問
+              const nextState = result as MediaDialogueState;
+              history.push({ role: "assistant", text: nextState.question });
 
-          // DB更新
-          await updateSellItem(activeSellItem.id, {
-            extracted_info: nextState.extracted_info,
-            dialogue_history: history,
-            status: nextState.is_sufficient ? "completed" : "questioning"
-          });
+              await updateSellItem(activeSellItem.id, {
+                extracted_info: {
+                  type: "media_dialogue",
+                  visual_clues: nextState.visual_clues
+                },
+                dialogue_history: history,
+                status: "questioning"
+              });
 
-          if (nextState.is_sufficient && nextState.listing) {
-            // 完了 -> 出品文送信
-            await replyMessage(replyToken, [
-              { type: "text", text: "聞き取りありがとうございました！\nこちらで出品文を作成しました👇" },
-              buildListingFlexMessage(nextState.listing),
-              { type: "text", text: nextState.listing.title },
-              { type: "text", text: nextState.listing.description },
-              { type: "text", text: "↑ 上の吹き出しを長押しするとコピーできます！" }
-            ]);
+              await replyMessage(replyToken, [{
+                type: "text",
+                text: "🎬 " + nextState.question
+              }]);
+
+            } else {
+              // 特定成功！
+              const mediaInfo = result as MediaInfo;
+
+              // ステータス完了へ
+              await updateSellItem(activeSellItem.id, {
+                status: "completed"
+              });
+
+              // ログ記録
+              await logUsage(userId, "media_identify_dialogue_success", {
+                media_type: mediaInfo.media_type,
+                title: mediaInfo.title
+              });
+
+              // お礼メッセージ + 評価Flex
+              await replyMessage(replyToken, [
+                { type: "text", text: "わかりました！ありがとうございます😊" },
+                buildMediaConfirmFlexMessage(mediaInfo, `dialogue_${activeSellItem.id}`)
+              ]);
+            }
           } else {
-            // 継続 -> 質問送信
-            await replyMessage(replyToken, [{ type: "text", text: nextState.next_question || "情報を教えてください。" }]);
+            // エラーまたは会話終了 (nullの場合)
+            // すぐに諦めず、ユーザーに入力を促す
+            await replyMessage(replyToken, [{
+              type: "text",
+              text: "🤔 うーん、まだピンときていません...\n\nもう少し詳しく教えてもらえますか？\n（例：出演者、ストーリー、放送局など）"
+            }]);
+            // ステータスは変えず、対話継続
           }
+
         } else {
-          await replyMessage(replyToken, [{ type: "text", text: "すみません、うまく処理できませんでした。もう一度教えてください。" }]);
+          // -------- 出品対話 (既存) --------
+          console.log("Continuing selling dialogue for item:", activeSellItem.id);
+
+          // ユーザーの回答を履歴に追加
+          const history = (activeSellItem.dialogue_history || []) as { role: string; text: string }[];
+          history.push({ role: "user", text: message.text });
+
+          // Geminiで次のステップを生成
+          const nextState = await continueSellingDialogue(
+            activeSellItem.extracted_info,
+            activeSellItem.image_summary || "",
+            history,
+            message.text
+          );
+
+          if (nextState) {
+            // 履歴にAIの応答を追加（質問または完了メッセージ）
+            const aiReplyText = nextState.is_sufficient
+              ? "ありがとうございます！出品文を作成しました。"
+              : (nextState.next_question || "詳細を教えてください。");
+
+            history.push({ role: "assistant", text: aiReplyText });
+
+            // DB更新
+            await updateSellItem(activeSellItem.id, {
+              extracted_info: nextState.extracted_info,
+              dialogue_history: history,
+              status: nextState.is_sufficient ? "completed" : "questioning"
+            });
+
+            if (nextState.is_sufficient && nextState.listing) {
+              // 完了 -> 出品文送信
+              await replyMessage(replyToken, [
+                { type: "text", text: "聞き取りありがとうございました！\nこちらで出品文を作成しました👇" },
+                buildListingFlexMessage(nextState.listing),
+                { type: "text", text: nextState.listing.title },
+                { type: "text", text: nextState.listing.description },
+              ]);
+              // 感想戦へ移行するため、statusはcompletedだが、感想戦タイマーを始動させてもよい
+              // ここでは一旦完了とする
+            } else {
+              // 質問継続
+              await replyMessage(replyToken, [
+                { type: "text", text: nextState.next_question || "詳細を教えてください。" }
+              ]);
+            }
+          } else {
+            // エラー
+            await replyMessage(replyToken, [{ type: "text", text: "すみません、うまく処理できませんでした。もう一度教えてください。" }]);
+          }
         }
         return;
       }
-
 
 
       // ==================== コンテキスト会話（見た感想戦 & 売る感想戦） ====================
@@ -1316,18 +1390,61 @@ async function handleMessageEvent(event: LineEvent) {
           const mediaInfo = await identifyMedia(base64, mimeType);
 
           if (mediaInfo) {
-            console.log("Media identified:", mediaInfo);
+            console.log("Media identification result:", mediaInfo);
 
-            await logUsage(userId, "media_identify", {
-              media_type: mediaInfo.media_type,
-              title: mediaInfo.title,
-              latency_ms: Date.now() - startTime,
-            });
+            // 型ガード: MediaInfo か MediaDialogueState か判定
+            if ("visual_clues" in mediaInfo) {
+              // ==================== 対話モード (特定失敗) ====================
+              const dialogueState = mediaInfo as MediaDialogueState;
 
-            // 評価ボタン付きFlex Messageで返信
-            await replyMessage(replyToken, [buildMediaConfirmFlexMessage(mediaInfo, message.id)]);
+              // sell_items テーブルを流用して対話状態を保存
+              // extracted_info に type: "media_dialogue" を含める
+              const supabase = getSupabaseClient();
+
+              // 既存のセッションがあればキャンセル
+              const activeItem = await getActiveSellItem(userId);
+              if (activeItem) {
+                await updateSellItem(activeItem.id, { status: "cancelled" });
+              }
+
+              const dialogueHistory = [
+                { role: "assistant", text: dialogueState.question }
+              ];
+
+              await supabase.from("sell_items").insert({
+                line_user_id: userId,
+                status: "questioning",
+                image_summary: dialogueState.visual_clues,
+                extracted_info: {
+                  type: "media_dialogue", // 区別用フラグ
+                  visual_clues: dialogueState.visual_clues
+                },
+                dialogue_history: dialogueHistory
+              });
+
+              await logUsage(userId, "media_dialogue_start", {});
+
+              // 質問メッセージを送信
+              await replyMessage(replyToken, [{
+                type: "text",
+                text: "🎬 " + dialogueState.question
+              }]);
+
+            } else {
+              // ==================== 特定成功 (MediaInfo) ====================
+              const info = mediaInfo as MediaInfo;
+
+              await logUsage(userId, "media_identify", {
+                media_type: info.media_type,
+                title: info.title,
+                latency_ms: Date.now() - startTime,
+              });
+
+              // 評価ボタン付きFlex Messageで返信
+              await replyMessage(replyToken, [buildMediaConfirmFlexMessage(info, message.id)]);
+            }
           } else {
-            // メディアが特定できなかった場合 → 救急箱フローにフォールバック
+            // メディアが特定できなかった場合 (null) → 救急箱フローにフォールバック
             console.log("Media not identified, falling back to help flow");
             await handleHelpImageFlow(replyToken, userId, base64, mimeType, message.id, userContext, startTime);
           }
@@ -1376,6 +1493,33 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
 
   // 下書きコピー処理は廃止（メディアログに置き換え）
 
+  const action = params.get("action");
+
+  // ==================== メディアログ関連 ====================
+
+  // メディア履歴閲覧 (action=view_media_history)
+  if (action === "view_media_history") {
+    console.log("Fetching media logs for user:", userId);
+    const supabase = getSupabaseClient();
+
+    const { data: items, error } = await supabase
+      .from("media_logs")
+      .select("*")
+      .eq("line_user_id", userId)
+      .order("watched_at", { ascending: false })
+      .limit(20);
+
+    if (error) {
+      console.error("Media logs fetch error:", error);
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "エラーが発生しました。時間をおいて試してください。" }]);
+      return;
+    }
+
+    await logUsage(userId, "media_list", { count: items?.length || 0 });
+    if (event.replyToken) await replyMessage(event.replyToken, [buildMediaListFlexMessage(items || [])]);
+    return;
+  }
+
   // Vision結果処理
   const visionId = params.get("vision");
   const result = params.get("result");
@@ -1395,9 +1539,7 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
     return;
   }
 
-  const action = params.get("action");
-
-  // ==================== メディアログ関連 ====================
+  // ==================== メディアログ関連 (評価・スキップ) ====================
 
   // メディア評価保存 (action=rate_media)
   if (action === "rate_media") {
@@ -1493,23 +1635,26 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
     const cost = parseInt(params.get("cst") || "0");
 
     const supabase = getSupabaseClient();
+    // ユーザー登録があれば取得（なければnull）
     const { data: userCtx } = await supabase.from("user_contexts").select("user_id").eq("line_user_id", userId).single();
 
-    if (userCtx) {
-      await supabase.from("ledgers").insert({
-        user_id: userCtx.user_id,
-        line_user_id: userId,
-        service_name: serviceName,
-        category,
-        monthly_cost: cost,
-        status: 'active'
-      });
+    // ユーザー登録がなくても台帳には保存する（line_user_idで紐付け）
+    const { error: insertError } = await supabase.from("ledgers").insert({
+      user_id: userCtx?.user_id, // あれば入れる
+      line_user_id: userId,
+      service_name: serviceName,
+      category,
+      monthly_cost: cost,
+      status: 'active'
+    });
 
+    if (insertError) {
+      console.error("Ledger insert error:", insertError);
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "台帳の登録に失敗しました。もう一度試してください。" }]);
+    } else {
       await logUsage(userId, "ledger_confirm", { service: serviceName });
       // 成功メッセージ
       if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: `「${serviceName}」を台帳に登録しました！✅\n\n後でお子さんが確認してくれます。` }]);
-    } else {
-      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "ユーザー登録が見つかりません。設定画面から登録してください。" }]);
     }
     return;
   }

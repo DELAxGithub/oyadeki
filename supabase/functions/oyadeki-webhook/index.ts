@@ -5,7 +5,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { verifySignature } from "../_shared/line-signature.ts";
 import { isDuplicate } from "../_shared/dedup.ts";
 import { logUsage, getUserContext, UserContext } from "../_shared/supabase-client.ts";
-import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, MediaDialogueState, IdentifyMediaResult, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, continueMediaDialogue, chatWithContext, enrichMediaInfo } from "../_shared/gemini-client.ts";
+import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, MediaDialogueState, IdentifyMediaResult, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, continueMediaDialogue, chatWithContext, enrichMediaInfo, parseReminder, ParsedReminder } from "../_shared/gemini-client.ts";
 import { getSupabaseClient } from "../_shared/supabase-client.ts";
 
 const LINE_API_BASE = "https://api.line.me/v2/bot";
@@ -703,6 +703,215 @@ function buildMediaConfirmFlexMessage(media: MediaInfo) {
   };
 }
 
+// ==================== リマインダー関連 ====================
+
+const recurrenceLabels: Record<string, string> = {
+  none: "",
+  daily: "🔁 毎日",
+  weekly: "🔁 毎週",
+  monthly: "🔁 毎月",
+};
+
+/**
+ * 日時を「2/5 (水) 15:00」形式にフォーマット
+ */
+function formatDateJST(isoStr: string): string {
+  const d = new Date(isoStr);
+  const weekdays = ["日", "月", "火", "水", "木", "金", "土"];
+  const month = d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric" });
+  const day = d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", day: "numeric" });
+  const weekday = weekdays[new Date(d.toLocaleString("en-US", { timeZone: "Asia/Tokyo" })).getDay()];
+  const hour = d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", hour12: false });
+  const minute = d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", minute: "2-digit" });
+  return `${month}/${day} (${weekday}) ${hour}:${minute}`;
+}
+
+/**
+ * 相対日時ラベル（「今日」「明日」等）
+ */
+function relativeDateLabel(isoStr: string): string {
+  const now = new Date();
+  const target = new Date(isoStr);
+  const nowJST = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+  const targetJST = new Date(target.toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+  const diffDays = Math.floor((targetJST.getTime() - nowJST.getTime()) / (1000 * 60 * 60 * 24));
+  if (diffDays === 0) return "今日";
+  if (diffDays === 1) return "明日";
+  if (diffDays === 2) return "明後日";
+  return formatDateJST(isoStr);
+}
+
+/**
+ * リマインダー登録確認用Flex Message
+ */
+function buildReminderConfirmFlexMessage(parsed: ParsedReminder) {
+  const contents: unknown[] = [
+    { type: "text", text: "✅ リマインダー登録", weight: "bold", size: "md", color: "#06C755" },
+    { type: "separator", margin: "md" },
+    { type: "text", text: `📝 ${parsed.title}`, wrap: true, size: "md", margin: "md", weight: "bold" },
+  ];
+
+  if (parsed.due_at) {
+    contents.push({ type: "text", text: `📅 期限: ${relativeDateLabel(parsed.due_at)}`, size: "sm", color: "#666666", margin: "sm" });
+  }
+  if (parsed.remind_at) {
+    contents.push({ type: "text", text: `🔔 通知: ${formatDateJST(parsed.remind_at)}`, size: "sm", color: "#666666", margin: "sm" });
+  }
+  if (parsed.recurrence !== "none") {
+    contents.push({ type: "text", text: recurrenceLabels[parsed.recurrence], size: "sm", color: "#1976D2", margin: "sm" });
+  }
+  if (parsed.note) {
+    contents.push({ type: "text", text: `💬 ${parsed.note}`, size: "xs", color: "#888888", margin: "sm", wrap: true });
+  }
+
+  // postbackデータにパース結果を埋め込む
+  const postbackData = `action=register_reminder` +
+    `&title=${encodeURIComponent(parsed.title.substring(0, 60))}` +
+    (parsed.due_at ? `&due=${encodeURIComponent(parsed.due_at)}` : "") +
+    (parsed.remind_at ? `&remind=${encodeURIComponent(parsed.remind_at)}` : "") +
+    `&rec=${parsed.recurrence}` +
+    (parsed.note ? `&note=${encodeURIComponent(parsed.note.substring(0, 30))}` : "");
+
+  return {
+    type: "flex",
+    altText: `リマインダー登録: ${parsed.title}`,
+    contents: {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents,
+      },
+      footer: {
+        type: "box",
+        layout: "horizontal",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            height: "sm",
+            action: { type: "postback", label: "登録する", data: postbackData },
+          },
+          {
+            type: "button",
+            style: "secondary",
+            height: "sm",
+            action: { type: "postback", label: "やめる", data: "action=cancel_reminder" },
+          },
+        ],
+      },
+    },
+  };
+}
+
+/**
+ * リマインダー一覧カルーセルFlex Message
+ */
+function buildReminderListFlexMessage(items: any[], liffUrl?: string) {
+  if (items.length === 0) {
+    return {
+      type: "text",
+      text: "📋 やることリストは空です！\n\n「やること 〇〇」で追加できます。\n例: 「やること 牛乳買う 明日」",
+    };
+  }
+
+  const displayItems = items.slice(0, 10);
+
+  const bubbles = displayItems.map((item) => {
+    const dueText = item.due_at ? `📅 ${relativeDateLabel(item.due_at)}` : "📅 期限なし";
+    const recText = item.recurrence !== "none" ? recurrenceLabels[item.recurrence] : "";
+    const isOverdue = item.due_at && new Date(item.due_at) < new Date() && item.status === "pending";
+
+    return {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        backgroundColor: isOverdue ? "#FFF3E0" : "#FFFFFF",
+        contents: [
+          {
+            type: "box",
+            layout: "horizontal",
+            contents: [
+              { type: "text", text: "📋", size: "md" },
+              ...(isOverdue ? [{ type: "text", text: "期限超過", size: "xs", color: "#FFFFFF", backgroundColor: "#E65100", margin: "sm" }] : []),
+              ...(recText ? [{ type: "text", text: recText, size: "xs", color: "#1976D2", margin: "sm" }] : []),
+            ],
+            alignItems: "center",
+          },
+          { type: "text", text: item.title, weight: "bold", size: "lg", margin: "sm", wrap: true },
+          { type: "text", text: dueText, size: "sm", color: isOverdue ? "#E65100" : "#666666", margin: "sm" },
+          ...(item.note ? [{ type: "text", text: `💬 ${item.note}`, size: "xs", color: "#888888", margin: "sm", wrap: true }] : []),
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "horizontal",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            height: "sm",
+            action: { type: "postback", label: "✅ 完了", data: `action=complete_reminder&id=${item.id}` },
+          },
+          {
+            type: "button",
+            style: "secondary",
+            height: "sm",
+            action: { type: "postback", label: "🗑 削除", data: `action=delete_reminder&id=${item.id}` },
+          },
+        ],
+      },
+    };
+  });
+
+  // サマリーバブルを先頭に
+  const summaryBubble = {
+    type: "bubble",
+    body: {
+      type: "box",
+      layout: "vertical",
+      contents: [
+        { type: "text", text: "📋 やることリスト", weight: "bold", size: "lg" },
+        { type: "separator", margin: "md" },
+        {
+          type: "box", layout: "vertical", margin: "md", spacing: "sm",
+          contents: [
+            { type: "text", text: `未完了: ${items.length}件`, size: "md", weight: "bold", color: "#06C755" },
+          ],
+        },
+      ],
+    },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      contents: [
+        {
+          type: "button",
+          style: "secondary",
+          height: "sm",
+          action: { type: "message", label: "＋ 新しいやることを追加", text: "やること" },
+        },
+      ],
+    },
+  };
+  bubbles.unshift(summaryBubble);
+
+  return {
+    type: "flex",
+    altText: `やることリスト (${items.length}件)`,
+    contents: {
+      type: "carousel",
+      contents: bubbles,
+    },
+  };
+}
+
+
 // ==================== 台帳関連（既存） ====================
 
 /**
@@ -952,7 +1161,7 @@ async function handleMessageEvent(event: LineEvent) {
   // 画像は常に反応、テキストは「呼びかけ」のみ反応
   if ((sourceType === "group" || sourceType === "room") && message.type === "text") {
     const text = message.text?.toLowerCase() || "";
-    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定"];
+    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定", "やること", "リマインド", "todo"];
     const isCalled = keywords.some(k => text.includes(k));
 
     if (!isCalled) {
@@ -1080,7 +1289,8 @@ async function handleMessageEvent(event: LineEvent) {
               "【困った時（VAR判定）】\n📷 スマホ画面のスクショを送ってね！\n→ 詐欺かどうか／操作方法を解説するよ！\n\n" +
               "【見たものを記録（メディアログ）】\n📺 テレビや映画の画面を送ってね！\n→ 番組を特定して記録するよ\n→「見た」で履歴が見られるよ\n\n" +
               "【メルカリ出品（パス出し）】\n📦「売る」と送ってから商品の写真を送ってね！\n→ AI店員が詳しく質問するよ（対話モード）\n\n" +
-              "【コマンド一覧】\n「台帳」「見た」「売る」「設定」「使い方」",
+              "【やることリスト（シゴデキ）】\n📋「やること 牛乳買う 明日」で登録！\n→「やること」で一覧が見られるよ\n\n" +
+              "【コマンド一覧】\n「台帳」「見た」「売る」「やること」「設定」「使い方」",
           },
           {
             type: "text",
@@ -1091,6 +1301,53 @@ async function handleMessageEvent(event: LineEvent) {
           },
         ]);
         return;
+      }
+
+      // ==================== リマインダー ====================
+
+      // リマインダー一覧表示: "やること" / "TODO" / "リマインダー" (引数なし)
+      if ((lowerText === "やること" || lowerText === "todo" || lowerText === "リマインダー")) {
+        const supabase = getSupabaseClient();
+        const { data: items, error } = await supabase
+          .from("reminders")
+          .select("*")
+          .eq("line_user_id", userId)
+          .eq("status", "pending")
+          .order("due_at", { ascending: true, nullsFirst: false });
+
+        if (error) {
+          console.error("Reminder fetch error:", error);
+          await replyMessage(replyToken, [{ type: "text", text: "エラーが発生しました。時間をおいて試してください。" }]);
+          return;
+        }
+
+        await logUsage(userId, "reminder_list", { count: items?.length || 0 });
+        await replyMessage(replyToken, [buildReminderListFlexMessage(items || [])]);
+        return;
+      }
+
+      // リマインダー作成: "やること 〇〇" / "リマインド 〇〇" / "TODO 〇〇" (引数あり)
+      {
+        const reminderMatch = message.text.match(/^(やること|リマインド|リマインダー|TODO|todo)\s+(.+)$/is);
+        if (reminderMatch) {
+          const inputText = reminderMatch[2].trim();
+          console.log("Parsing reminder:", inputText);
+
+          const nowJST = new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }).replace(" ", "T") + "+09:00";
+
+          try {
+            const parsed = await parseReminder(message.text, nowJST);
+            console.log("Parsed reminder:", JSON.stringify(parsed));
+
+            await replyMessage(replyToken, [buildReminderConfirmFlexMessage(parsed)]);
+          } catch (parseError) {
+            console.error("Reminder parse error:", parseError);
+            // パース失敗時もタイトルだけで確認を出す
+            const fallbackParsed: ParsedReminder = { title: inputText, recurrence: "none" };
+            await replyMessage(replyToken, [buildReminderConfirmFlexMessage(fallbackParsed)]);
+          }
+          return;
+        }
       }
 
       // ==================== 出品対話 & メディア対話モード処理 ====================
@@ -1413,6 +1670,7 @@ async function handleMessageEvent(event: LineEvent) {
             "コマンド一覧：\n" +
             "「台帳」→ 契約情報\n" +
             "「見た」→ 視聴記録\n" +
+            "「やること」→ リマインダー\n" +
             "「設定」→ 環境設定\n" +
             "「使い方」→ ヘルプ",
         },
@@ -1718,6 +1976,108 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
         text: "スキップしました👌\n\nまた記録したいものがあれば、写真を送ってくださいね！",
       }]);
     }
+    return;
+  }
+
+  // ==================== リマインダー関連 ====================
+
+  // リマインダー登録確定 (action=register_reminder)
+  if (action === "register_reminder") {
+    const title = decodeURIComponent(params.get("title") || "");
+    const dueAt = params.get("due") ? decodeURIComponent(params.get("due")!) : null;
+    const remindAt = params.get("remind") ? decodeURIComponent(params.get("remind")!) : null;
+    const recurrence = params.get("rec") || "none";
+    const note = params.get("note") ? decodeURIComponent(params.get("note")!) : null;
+
+    if (!title) {
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "エラー：タイトルが見つかりません。" }]);
+      return;
+    }
+
+    const supabase = getSupabaseClient();
+    const groupId = event.source.groupId || null;
+
+    const { error: insertError } = await supabase.from("reminders").insert({
+      line_user_id: userId,
+      group_id: groupId,
+      title,
+      note,
+      due_at: dueAt,
+      remind_at: remindAt,
+      recurrence,
+      status: "pending",
+    });
+
+    if (insertError) {
+      console.error("Reminder insert error:", insertError);
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "登録に失敗しました。もう一度試してください。" }]);
+      return;
+    }
+
+    await logUsage(userId, "reminder_create", { title, has_due: !!dueAt, recurrence });
+
+    let confirmText = `📝「${title}」を登録しました！`;
+    if (remindAt) {
+      confirmText += `\n🔔 ${formatDateJST(remindAt)} にお知らせします。`;
+    }
+    if (dueAt) {
+      confirmText += `\n📅 期限: ${relativeDateLabel(dueAt)}`;
+    }
+
+    if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: confirmText }]);
+    return;
+  }
+
+  // リマインダーキャンセル (action=cancel_reminder)
+  if (action === "cancel_reminder") {
+    if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "👌 キャンセルしました。" }]);
+    return;
+  }
+
+  // リマインダー完了 (action=complete_reminder)
+  if (action === "complete_reminder") {
+    const reminderId = params.get("id");
+    if (!reminderId) {
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "エラー：IDが見つかりません。" }]);
+      return;
+    }
+
+    const supabase = getSupabaseClient();
+
+    // 完了前にタイトルを取得
+    const { data: reminder } = await supabase
+      .from("reminders")
+      .select("title, group_id")
+      .eq("id", reminderId)
+      .single();
+
+    await supabase.from("reminders").update({
+      status: "completed",
+      completed_at: new Date().toISOString(),
+      completed_by: userId,
+    }).eq("id", reminderId);
+
+    await logUsage(userId, "reminder_complete", { id: reminderId });
+
+    const titleText = reminder?.title || "タスク";
+    if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: `✅「${titleText}」完了！おつかれさまです！` }]);
+    return;
+  }
+
+  // リマインダー削除 (action=delete_reminder)
+  if (action === "delete_reminder") {
+    const reminderId = params.get("id");
+    if (!reminderId) {
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "エラー：IDが見つかりません。" }]);
+      return;
+    }
+
+    const supabase = getSupabaseClient();
+    await supabase.from("reminders").update({ status: "cancelled" }).eq("id", reminderId);
+
+    await logUsage(userId, "reminder_delete", { id: reminderId });
+
+    if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "🗑 削除しました。" }]);
     return;
   }
 

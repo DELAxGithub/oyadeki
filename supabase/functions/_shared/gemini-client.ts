@@ -611,6 +611,104 @@ async function enrichFromiTunes(media: MediaInfo): Promise<MediaInfo> {
     };
 }
 
+// ==================== リマインダー解析 ====================
+
+export interface ParsedReminder {
+    title: string;
+    note?: string;
+    due_at?: string;      // ISO8601 (JST)
+    remind_at?: string;   // ISO8601 (JST)
+    recurrence: "none" | "daily" | "weekly" | "monthly";
+}
+
+/**
+ * 自然言語テキストからリマインダー情報を抽出する
+ * 例: "やること 牛乳買う 明日" → { title: "牛乳買う", due_at: "2026-02-05T23:59:00+09:00", ... }
+ */
+export async function parseReminder(
+    text: string,
+    nowIso: string
+): Promise<ParsedReminder> {
+    const prompt = `ユーザーのテキストからリマインダー情報を抽出してください。
+
+現在時刻: ${nowIso}
+
+JSON形式で返してください:
+{
+  "title": "やること内容（コマンド部分は除く）",
+  "note": "補足（あれば、なければnull）",
+  "due_at": "ISO8601形式 タイムゾーン+09:00 （期限、なければnull）",
+  "remind_at": "ISO8601形式 タイムゾーン+09:00 （通知時刻、なければnull）",
+  "recurrence": "none|daily|weekly|monthly"
+}
+
+ルール:
+- 「やること」「リマインド」「TODO」などのコマンド部分はtitleから除外する
+- 「明日」「来週」「毎週火曜」等の相対表現を現在時刻から計算する
+- 時刻指定がなければ期限は当日23:59、通知は朝9:00
+- 期限が今日中なら通知は1時間後
+- 繰り返し表現（毎日、毎週〇曜、毎月〇日）があればrecurrenceを設定
+- 解釈できない場合はtitleのみセットし他はnull、recurrenceはnone
+
+入力テキスト: "${text}"`;
+
+    const apiKey = Deno.env.get("GEMINI_API_KEY")!;
+    const model = "gemini-2.5-flash";
+    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+                response_mime_type: "application/json",
+                temperature: 0.1,
+                maxOutputTokens: 512,
+                thinkingConfig: { thinkingBudget: 0 },
+            },
+        }),
+    });
+
+    if (!response.ok) {
+        console.error("parseReminder failed:", response.status);
+        // フォールバック: タイトルだけ返す
+        const cleanTitle = text
+            .replace(/^(やること|リマインド|リマインダー|TODO|todo)\s*/i, "")
+            .trim();
+        return { title: cleanTitle || text, recurrence: "none" };
+    }
+
+    const data = await response.json();
+    const parts = data.candidates?.[0]?.content?.parts;
+    let jsonText = "null";
+    if (parts) {
+        for (const part of parts) {
+            if (part.text && !part.thought) {
+                jsonText = part.text;
+                break;
+            }
+        }
+    }
+
+    try {
+        const parsed = JSON.parse(jsonText);
+        return {
+            title: parsed.title || text,
+            note: parsed.note || undefined,
+            due_at: parsed.due_at || undefined,
+            remind_at: parsed.remind_at || undefined,
+            recurrence: parsed.recurrence || "none",
+        };
+    } catch (e) {
+        console.error("Failed to parse reminder JSON:", e);
+        const cleanTitle = text
+            .replace(/^(やること|リマインド|リマインダー|TODO|todo)\s*/i, "")
+            .trim();
+        return { title: cleanTitle || text, recurrence: "none" };
+    }
+}
+
 export interface ListingInfo {
     title: string;           // 出品タイトル（40文字以内）
     description: string;     // 説明文

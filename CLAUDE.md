@@ -74,3 +74,37 @@ deno task preview    # 本番プレビュー
 - コピー採用率: A/B/Cの選択分布
 - 通話誘発: call_suggest後T+6hの応答率 ≥ 40%
 - レイテンシ: P50 ≤ 3.5s / P95 ≤ 7s
+
+## タスク管理機能 (2026-02-05 追加)
+
+shigodekiとの連携を想定したタスク管理機能。
+
+### 構成
+- `tasks` テーブル: project, phase, priority, scheduled_date等
+- LIFF: `/tasks/[userId]` 一覧ページ
+- API: `/api/tasks/[userId]` (CRUD), `/api/tasks/import` (JSON一括)
+- Bot: 「タスク」「やること」「todo」コマンド
+- Edge Function: `daily-task-push` (日次配信)
+
+### インポート例
+```bash
+curl -X POST https://oyadeki-liff.deno.dev/api/tasks/import \
+  -H "Content-Type: application/json" \
+  -d '{"line_user_id":"Uxxxx","tasks":[{"title":"電気の検針票を探す","phase":"電気・ガス・水道","priority":10}]}'
+```
+
+### デプロイ
+```bash
+# LIFF
+cd liff && deno task build
+deno run -A jsr:@deno/deployctl deploy --project=oyadeki-liff --prod liff/main.ts
+
+# Edge Functions
+npx supabase functions deploy oyadeki-webhook --no-verify-jwt
+npx supabase functions deploy daily-task-push --no-verify-jwt
+```
+
+### 残り作業
+- [ ] daily-task-push のcron設定（毎朝8時）
+- [ ] shigodeki側のJSONエクスポート機能
+- [ ] 実運用テスト

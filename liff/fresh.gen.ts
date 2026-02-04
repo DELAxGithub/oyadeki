@@ -5,14 +5,17 @@
 import * as $_404 from "./routes/_404.tsx";
 import * as $_app from "./routes/_app.tsx";
 import * as $api_joke from "./routes/api/joke.ts";
+import * as $api_media_userId_ from "./routes/api/media/[userId].ts";
 import * as $api_share_token_ from "./routes/api/share/[token].ts";
 import * as $api_user_context from "./routes/api/user-context.ts";
 import * as $greet_name_ from "./routes/greet/[name].tsx";
 import * as $index from "./routes/index.tsx";
+import * as $media_userId_ from "./routes/media/[userId].tsx";
 import * as $settings_index from "./routes/settings/index.tsx";
 import * as $share_token_ from "./routes/share/[token].tsx";
 import * as $Counter from "./islands/Counter.tsx";
 import * as $LiffApp from "./islands/LiffApp.tsx";
+import * as $MediaLogView from "./islands/MediaLogView.tsx";
 import * as $SettingsForm from "./islands/SettingsForm.tsx";
 import * as $ShareView from "./islands/ShareView.tsx";
 import type { Manifest } from "$fresh/server.ts";
@@ -22,16 +25,19 @@ const manifest = {
     "./routes/_404.tsx": $_404,
     "./routes/_app.tsx": $_app,
     "./routes/api/joke.ts": $api_joke,
+    "./routes/api/media/[userId].ts": $api_media_userId_,
     "./routes/api/share/[token].ts": $api_share_token_,
     "./routes/api/user-context.ts": $api_user_context,
     "./routes/greet/[name].tsx": $greet_name_,
     "./routes/index.tsx": $index,
+    "./routes/media/[userId].tsx": $media_userId_,
     "./routes/settings/index.tsx": $settings_index,
     "./routes/share/[token].tsx": $share_token_,
   },
   islands: {
     "./islands/Counter.tsx": $Counter,
     "./islands/LiffApp.tsx": $LiffApp,
+    "./islands/MediaLogView.tsx": $MediaLogView,
     "./islands/SettingsForm.tsx": $SettingsForm,
     "./islands/ShareView.tsx": $ShareView,
   },

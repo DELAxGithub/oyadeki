@@ -7,6 +7,7 @@ interface LedgerItem {
   account_identifier: string | null;
   monthly_cost: number | null;
   note: string | null;
+  storage_location: string | null;
   last_confirmed_at: string | null;
   created_at: string;
 }
@@ -229,6 +230,17 @@ export default function ShareView({ token }: ShareViewProps) {
                     </span>
                     <span class="bg-gray-50 px-2 py-1 rounded text-foreground-secondary flex-1">
                       {item.note}
+                    </span>
+                  </div>
+                )}
+
+                {item.storage_location && (
+                  <div class="flex items-start gap-2 text-sm text-foreground">
+                    <span class="text-foreground-muted w-10 shrink-0">
+                      保管
+                    </span>
+                    <span class="font-medium">
+                      📂 {item.storage_location}
                     </span>
                   </div>
                 )}

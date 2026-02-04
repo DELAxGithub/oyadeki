@@ -52,7 +52,7 @@ export const handler: Handlers = {
     const { data: ledgers, error: ledgerError } = await supabase
       .from("ledgers")
       .select(
-        "id, service_name, category, account_identifier, monthly_cost, note, last_confirmed_at, created_at",
+        "id, service_name, category, account_identifier, monthly_cost, note, storage_location, last_confirmed_at, created_at",
       )
       .eq("line_user_id", share.line_user_id)
       .eq("status", "active")

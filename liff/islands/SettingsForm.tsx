@@ -5,6 +5,8 @@ interface SettingsFormProps {
   lineUserId: string | null;
 }
 
+const SUGGESTED_LOCATIONS = ["リビングの棚", "書斎の引き出し", "寝室クローゼット", "玄関の棚"];
+
 /**
  * 設定フォーム (LINE/iOS Style)
  */
@@ -16,6 +18,8 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
   const tone = useSignal("polite");
   const dislikedPhrases = useSignal("");
   const consented = useSignal(false);
+  const storageLocations = useSignal<string[]>([]);
+  const newLocation = useSignal("");
 
   useEffect(() => {
     if (!lineUserId) {
@@ -33,6 +37,7 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
           tone.value = data.tone ?? "polite";
           dislikedPhrases.value = (data.disliked_phrases ?? []).join(", ");
           consented.value = !!data.consented_at;
+          storageLocations.value = data.storage_locations ?? [];
         }
       })
       .catch((e) => console.error(e))
@@ -54,6 +59,7 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
         .map((s) => s.trim())
         .filter((s) => s),
       consented_at: consented.value ? new Date().toISOString() : null,
+      storage_locations: storageLocations.value,
     };
 
     await fetch("/api/user-context", {
@@ -66,6 +72,18 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
     alert("保存しました");
   };
 
+  const addLocation = (loc: string) => {
+    const trimmed = loc.trim();
+    if (trimmed && !storageLocations.value.includes(trimmed)) {
+      storageLocations.value = [...storageLocations.value, trimmed];
+      newLocation.value = "";
+    }
+  };
+
+  const removeLocation = (index: number) => {
+    storageLocations.value = storageLocations.value.filter((_, i) => i !== index);
+  };
+
   if (!lineUserId) {
     return (
       <div class="flex items-center justify-center min-h-screen bg-gray-100">
@@ -74,10 +92,13 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
     );
   }
 
+  // 候補から既に登録済みのものを除外
+  const availableSuggestions = SUGGESTED_LOCATIONS.filter(
+    (s) => !storageLocations.value.includes(s)
+  );
+
   return (
     <div class="min-h-screen bg-[#F5F5F5] pb-20 font-sans">
-      {/* Header handled by LiffApp or unnecessary in LIFF fullbleed */}
-
       {/* Section: Personality */}
       <div class="pt-6">
         <h2 class="px-4 pb-2 text-xs text-gray-500 uppercase font-medium">
@@ -140,6 +161,76 @@ export default function SettingsForm({ lineUserId }: SettingsFormProps) {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Section: Storage Locations */}
+      <div class="pt-6">
+        <h2 class="px-4 pb-2 text-xs text-gray-500 uppercase font-medium">
+          書類の保管場所
+        </h2>
+        <div class="bg-white border-y border-gray-200">
+          {/* 登録済みの場所リスト */}
+          {storageLocations.value.map((loc, i) => (
+            <div
+              key={`${loc}-${i}`}
+              class="flex items-center justify-between px-4 py-3 border-b border-gray-100"
+            >
+              <span class="text-base text-gray-900">{loc}</span>
+              <button
+                onClick={() => removeLocation(i)}
+                class="text-red-400 text-sm px-2 py-1"
+              >
+                削除
+              </button>
+            </div>
+          ))}
+
+          {/* 新規追加入力 */}
+          <div class="flex items-center gap-2 px-4 py-3">
+            <input
+              type="text"
+              value={newLocation.value}
+              onInput={(e) =>
+                (newLocation.value = (e.target as HTMLInputElement).value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addLocation(newLocation.value);
+                }
+              }}
+              class="flex-1 text-base text-gray-900 focus:outline-none placeholder-gray-400"
+              placeholder="場所を入力..."
+            />
+            <button
+              onClick={() => addLocation(newLocation.value)}
+              disabled={!newLocation.value.trim()}
+              class="px-3 py-1 text-sm font-medium text-white bg-[#06C755] rounded-lg disabled:bg-gray-300"
+            >
+              追加
+            </button>
+          </div>
+
+          {/* 候補ボタン */}
+          {availableSuggestions.length > 0 && (
+            <div class="px-4 py-2 border-t border-gray-100">
+              <p class="text-xs text-gray-400 mb-2">候補から追加:</p>
+              <div class="flex flex-wrap gap-2">
+                {availableSuggestions.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => addLocation(s)}
+                    class="px-3 py-1 text-xs bg-gray-100 text-gray-600 rounded-full border border-gray-200 active:bg-gray-200"
+                  >
+                    + {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <p class="px-4 pt-1 text-xs text-gray-400">
+          台帳登録時に「紙はどこにしまった？」と聞かれます。
+        </p>
       </div>
 
       {/* Section: Constraints */}

@@ -1,14 +1,22 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
+import { encode as encodeBase64 } from "https://deno.land/std@0.177.0/encoding/base64.ts";
+// import { Image } from "https://deno.land/x/imagescript@1.2.15/mod.ts"; // Removed due to boot failure
 import { corsHeaders } from "../_shared/cors.ts";
 import { verifySignature } from "../_shared/line-signature.ts";
 import { isDuplicate } from "../_shared/dedup.ts";
 import { logUsage, getUserContext, UserContext } from "../_shared/supabase-client.ts";
-import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, MediaDialogueState, IdentifyMediaResult, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, continueMediaDialogue, chatWithContext } from "../_shared/gemini-client.ts";
+import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, MediaDialogueState, IdentifyMediaResult, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, continueMediaDialogue, chatWithContext, enrichMediaInfo } from "../_shared/gemini-client.ts";
 import { getSupabaseClient } from "../_shared/supabase-client.ts";
 
 const LINE_API_BASE = "https://api.line.me/v2/bot";
 const LINE_DATA_API_BASE = "https://api-data.line.me/v2/bot";
 const TIMEOUT_MS = 3000;
+// const MAX_IMAGE_BYTES = 2_000_000;
+// const MAX_IMAGE_DIMENSION = 1280;
+// const MAX_RESIZE_INPUT_BYTES = 10_000_000;
+// const JPEG_QUALITY = 82;
+// const JPEG_FALLBACK_QUALITY = 68;
+
 
 interface LineEvent {
   type: string;
@@ -35,14 +43,22 @@ interface LineWebhookBody {
  */
 async function replyMessage(replyToken: string, messages: unknown[]) {
   const accessToken = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN")!;
-  await fetch(`${LINE_API_BASE}/message/reply`, {
+  const body = JSON.stringify({ replyToken, messages });
+  console.log("replyMessage: sending", body.length, "bytes");
+  const resp = await fetch(`${LINE_API_BASE}/message/reply`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${accessToken}`,
     },
-    body: JSON.stringify({ replyToken, messages }),
+    body,
   });
+  if (!resp.ok) {
+    const errorText = await resp.text();
+    console.error("replyMessage FAILED:", resp.status, errorText);
+    throw new Error(`LINE reply failed: ${resp.status} - ${errorText}`);
+  }
+  console.log("replyMessage: success");
 }
 
 /**
@@ -69,35 +85,41 @@ async function replyWithSafeFallback(replyToken: string) {
   ]);
 }
 
-// 下書き提案機能は削除されました（W6でメディアログ機能に置き換え）
-
 /**
  * LINE APIから画像を取得してBase64変換
  */
-async function getImageContent(messageId: string): Promise<{ base64: string; mimeType: string }> {
+async function fetchLineImageBytes(
+  messageId: string,
+  variant: "content" | "preview"
+): Promise<{ bytes: Uint8Array; mimeType: string }> {
   const accessToken = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN")!;
-  const response = await fetch(`${LINE_DATA_API_BASE}/message/${messageId}/content`, {
+  const suffix = variant === "preview" ? "/content/preview" : "/content";
+  const response = await fetch(`${LINE_DATA_API_BASE}/message/${messageId}${suffix}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch image: ${response.status}`);
+    throw new Error(`Failed to fetch image (${variant}): ${response.status}`);
   }
 
   const contentType = response.headers.get("Content-Type") || "image/jpeg";
   const arrayBuffer = await response.arrayBuffer();
+  return { bytes: new Uint8Array(arrayBuffer), mimeType: contentType };
+}
 
-  // 大きい画像に対応したBase64エンコード
-  const uint8Array = new Uint8Array(arrayBuffer);
-  let binary = "";
-  const chunkSize = 8192;
-  for (let i = 0; i < uint8Array.length; i += chunkSize) {
-    const chunk = uint8Array.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
+// Simplified: Always use preview image to avoid OOM and dependencies
+async function getImageContent(messageId: string): Promise<{ base64: string; mimeType: string }> {
+  try {
+    // Prefer preview image for safety (smaller size)
+    const preview = await fetchLineImageBytes(messageId, "preview");
+    console.log("Using preview image size:", preview.bytes.length);
+    return { base64: encodeBase64(preview.bytes), mimeType: preview.mimeType };
+  } catch (error) {
+    console.error("Failed to fetch preview, trying original content:", error);
+    // Fallback to original content (risky but better than nothing)
+    const original = await fetchLineImageBytes(messageId, "content");
+    return { base64: encodeBase64(original.bytes), mimeType: original.mimeType };
   }
-  const base64 = btoa(binary);
-
-  return { base64, mimeType: contentType };
 }
 
 /**
@@ -481,6 +503,13 @@ function buildLedgerListFlexMessage(items: any[], includeShareButton: boolean = 
                   { type: "text", text: item.note || "-", size: "sm", align: "end", flex: 5, wrap: true }
                 ]
               },
+              ...(item.storage_location ? [{
+                type: "box", layout: "horizontal",
+                contents: [
+                  { type: "text", text: "保管", size: "sm", color: "#888888", flex: 2 },
+                  { type: "text", text: `📂 ${item.storage_location}`, size: "sm", align: "end", flex: 5, wrap: true }
+                ]
+              }] : []),
             ]
           }
         ]
@@ -561,6 +590,7 @@ function buildLedgerListFlexMessage(items: any[], includeShareButton: boolean = 
 const mediaTypeLabels: Record<string, string> = {
   movie: "🎬 映画",
   tv_show: "📺 テレビ",
+  anime: "📺 アニメ",
   sports: "⚽ スポーツ",
   music: "🎵 音楽",
   book: "📚 本",
@@ -570,6 +600,7 @@ const mediaTypeLabels: Record<string, string> = {
 const mediaTypeEmoji: Record<string, string> = {
   movie: "🎬",
   tv_show: "📺",
+  anime: "📺",
   sports: "⚽",
   music: "🎵",
   book: "📚",
@@ -579,7 +610,7 @@ const mediaTypeEmoji: Record<string, string> = {
 /**
  * メディア識別結果の確認用Flex Message（評価ボタン付き）
  */
-function buildMediaConfirmFlexMessage(media: MediaInfo, messageId: string) {
+function buildMediaConfirmFlexMessage(media: MediaInfo) {
   const typeLabel = mediaTypeLabels[media.media_type] || "📝 その他";
   const castText = media.artist_or_cast ? `出演: ${media.artist_or_cast}` : "";
   const yearText = media.year ? `(${media.year})` : "";
@@ -593,25 +624,45 @@ function buildMediaConfirmFlexMessage(media: MediaInfo, messageId: string) {
     action: {
       type: "postback",
       label: `${star} ⭐`,
-      data: `action=rate_media&msgId=${messageId}&type=${media.media_type}&title=${encodeURIComponent(media.title.substring(0, 30))}&sub=${encodeURIComponent((media.subtitle || "").substring(0, 20))}&cast=${encodeURIComponent((media.artist_or_cast || "").substring(0, 20))}&year=${media.year || 0}&rating=${star}`,
+      data: `action=rate_media&type=${media.media_type}&title=${encodeURIComponent(media.title.substring(0, 12))}&sub=${encodeURIComponent((media.subtitle || "").substring(0, 5))}&cast=${encodeURIComponent((media.artist_or_cast || "").substring(0, 8))}&year=${media.year || 0}&rating=${star}`,
     },
   }));
 
+  // スコア表示
+  const scoreText = media.score ? `${media.score.toFixed(1)}` : "";
+
   return {
     type: "flex",
-    altText: `${typeLabel}「${media.title}」を見ましたか？`,
+    altText: `${typeLabel}「${media.title}」- 評価をつけてください`,
     contents: {
       type: "bubble",
+      // ポスター画像があればヒーロー表示
+      ...(media.poster_url ? {
+        hero: {
+          type: "image",
+          url: media.poster_url,
+          size: "full",
+          aspectRatio: "2:3",
+          aspectMode: "cover",
+        },
+      } : {}),
       body: {
         type: "box",
         layout: "vertical",
         spacing: "md",
         contents: [
-          { type: "text", text: typeLabel, size: "sm", color: "#06C755", weight: "bold" },
-          { type: "text", text: `${media.title} ${subtitleText}`, weight: "bold", size: "xl", wrap: true },
+          {
+            type: "box", layout: "horizontal", contents: [
+              { type: "text", text: typeLabel, size: "sm", color: "#06C755", weight: "bold", flex: 0 },
+              ...(scoreText ? [{
+                type: "text", text: `★ ${scoreText}`, size: "sm", color: "#ff8c00", weight: "bold",
+                align: "end" as const, flex: 0,
+              }] : []),
+            ],
+          },
+          { type: "text", text: `${media.title} ${subtitleText}`, weight: "bold", size: "lg", wrap: true },
           ...(castText ? [{ type: "text", text: castText, size: "sm", color: "#666666", wrap: true }] : []),
           ...(yearText ? [{ type: "text", text: yearText, size: "xs", color: "#888888" }] : []),
-          ...(media.trivia ? [{ type: "text", text: `💡 ${media.trivia}`, size: "sm", color: "#444444", wrap: true, margin: "md", backgroundColor: "#f0f8ff", paddingAll: "sm", cornerRadius: "md" }] : []),
           { type: "separator", margin: "md" },
           { type: "text", text: "⭐ 評価をつけてください", size: "sm", margin: "md" },
         ],
@@ -641,95 +692,13 @@ function buildMediaConfirmFlexMessage(media: MediaInfo, messageId: string) {
                 action: {
                   type: "postback",
                   label: "スキップ",
-                  data: `action=skip_media&msgId=${messageId}`,
+                  data: `action=skip_media`,
                 },
               },
             ],
           },
         ],
       },
-    },
-  };
-}
-
-/**
- * メディアログ一覧用Flex Message（カルーセル）
- */
-function buildMediaListFlexMessage(items: any[]) {
-  const displayItems = items.slice(0, 10);
-
-  if (displayItems.length === 0) {
-    return {
-      type: "text",
-      text: "📭 まだ何も記録していません。\n\nテレビや映画の画面を写真で送ると、見たものを記録できますよ！",
-    };
-  }
-
-  const bubbles = displayItems.map((item) => {
-    const emoji = mediaTypeEmoji[item.media_type] || "📝";
-    const stars = item.rating ? "⭐".repeat(item.rating) : "未評価";
-    const watchedDate = item.watched_at
-      ? new Date(item.watched_at).toLocaleDateString("ja-JP", { month: "short", day: "numeric" })
-      : "";
-
-    return {
-      type: "bubble",
-      size: "micro",
-      body: {
-        type: "box",
-        layout: "vertical",
-        contents: [
-          {
-            type: "box",
-            layout: "horizontal",
-            contents: [
-              { type: "text", text: emoji, size: "sm", flex: 0 },
-              { type: "text", text: item.title, weight: "bold", size: "sm", wrap: true, flex: 1, margin: "sm" },
-            ],
-          },
-          ...(item.subtitle ? [{ type: "text", text: item.subtitle, size: "xs", color: "#666666", wrap: true }] : []),
-          { type: "text", text: stars, size: "sm", margin: "md" },
-          { type: "text", text: watchedDate, size: "xxs", color: "#888888", align: "end" },
-        ],
-        paddingAll: "12px",
-      },
-    };
-  });
-
-  // サマリーバブルを先頭に追加
-  const summaryBubble = {
-    type: "bubble",
-    size: "micro",
-    body: {
-      type: "box",
-      layout: "vertical",
-      contents: [
-        { type: "text", text: "📖 見たもの", weight: "bold", size: "md" },
-        { type: "text", text: `${items.length}件の記録`, size: "sm", color: "#666666", margin: "sm" },
-        { type: "separator", margin: "md" },
-        {
-          type: "box",
-          layout: "vertical",
-          margin: "md",
-          spacing: "xs",
-          contents: [
-            { type: "text", text: `🎬 ${items.filter((i: any) => i.media_type === "movie").length}`, size: "xs" },
-            { type: "text", text: `📺 ${items.filter((i: any) => i.media_type === "tv_show").length}`, size: "xs" },
-            { type: "text", text: `⚽ ${items.filter((i: any) => i.media_type === "sports").length}`, size: "xs" },
-          ],
-        },
-      ],
-      paddingAll: "12px",
-      backgroundColor: "#F0FFF4",
-    },
-  };
-
-  return {
-    type: "flex",
-    altText: `📖 見たもの（${items.length}件）`,
-    contents: {
-      type: "carousel",
-      contents: [summaryBubble, ...bubbles],
     },
   };
 }
@@ -1072,8 +1041,22 @@ async function handleMessageEvent(event: LineEvent) {
             text: `📑 **契約台帳サマリー**\n\n登録件数: ${items.length}件\n月額合計: 約¥${total.toLocaleString()}\n\n${serviceList}\n\n※詳細は個人のトーク画面で「台帳」と打つと確認できます。`
           }]);
         } else {
-          // 個人チャットは詳細カルーセル
-          await replyMessage(replyToken, [buildLedgerListFlexMessage(items)]);
+          // 個人チャットはカルーセル + 一覧リンク
+          const supabase2 = getSupabaseClient();
+          const token = generateShareToken();
+          const expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + 30);
+          await supabase2.from("ledger_shares").insert({
+            line_user_id: userId,
+            token,
+            expires_at: expiresAt.toISOString(),
+          });
+          const fullListUrl = `https://oyadeki-liff.deno.dev/share/${token}`;
+
+          await replyMessage(replyToken, [
+            buildLedgerListFlexMessage(items),
+            { type: "text", text: `📋 全件一覧はこちら\n${fullListUrl}` },
+          ]);
         }
         return;
       }
@@ -1102,6 +1085,7 @@ async function handleMessageEvent(event: LineEvent) {
 
       // ==================== 出品対話 & メディア対話モード処理 ====================
       const activeSellItem = await getActiveSellItem(userId);
+      console.log("activeSellItem check:", activeSellItem ? `found (id=${activeSellItem.id}, status=${activeSellItem.status})` : "none");
 
       if (activeSellItem) {
         // キャンセル処理
@@ -1114,70 +1098,194 @@ async function handleMessageEvent(event: LineEvent) {
         // extracted_info の type でモード分岐
         const info = activeSellItem.extracted_info as any;
 
-        if (info && info.type === "media_dialogue") {
-          // -------- メディア対話 --------
-          console.log("Continuing media dialogue for item:", activeSellItem.id);
+        if (info && info.type === "media_confirm") {
+          // -------- メディア確認ステップ（ユーザーの最終確認） --------
+          console.log("Media confirm step for item:", activeSellItem.id);
+          const confirmedMedia = info.confirmed_media as MediaInfo;
+          const lowerReply = message.text.trim();
 
-          // ユーザーの回答を履歴に追加
-          const history = (activeSellItem.dialogue_history || []) as { role: string; text: string }[];
-          history.push({ role: "user", text: message.text });
+          // 肯定判定
+          const isPositive = /^(はい|うん|そう|そうです|合ってる|あってる|正解|ok|yes|おk|それ|それです)$/i.test(lowerReply)
+            || lowerReply.includes("合って") || lowerReply.includes("それ");
 
-          // Geminiで再特定
-          const result = await continueMediaDialogue(
-            info.visual_clues || "",
-            history,
-            message.text
-          );
+          if (isPositive && confirmedMedia) {
+            // 確定！→ 評価フェーズへ
+            console.log("  User confirmed:", confirmedMedia.title);
 
-          if (result) {
-            if ("visual_clues" in result) {
-              // まだ特定できず、次の質問
+            await updateSellItem(activeSellItem.id, { status: "completed" });
+
+            await logUsage(userId, "media_identify_dialogue_success", {
+              media_type: confirmedMedia.media_type,
+              title: confirmedMedia.title
+            });
+
+            await replyMessage(replyToken, [
+              { type: "text", text: `🎉 「${confirmedMedia.title}」ですね！` },
+              buildMediaConfirmFlexMessage(confirmedMedia)
+            ]);
+          } else {
+            // 否定 → 対話モードに戻す
+            console.log("  User denied, reverting to dialogue mode");
+
+            const history = (activeSellItem.dialogue_history || []) as { role: string; text: string }[];
+            history.push({ role: "user", text: message.text });
+
+            await updateSellItem(activeSellItem.id, {
+              extracted_info: {
+                type: "media_dialogue",
+                visual_clues: info.visual_clues || "",
+                media_candidate: null, // 候補リセット
+              },
+              dialogue_history: history,
+              status: "questioning"
+            });
+
+            // Geminiで別の候補を探す
+            const result = await continueMediaDialogue(
+              info.visual_clues || "",
+              history,
+              message.text,
+              null // 候補リセット
+            );
+
+            if (result && "visual_clues" in result) {
               const nextState = result as MediaDialogueState;
               history.push({ role: "assistant", text: nextState.question });
 
               await updateSellItem(activeSellItem.id, {
                 extracted_info: {
                   type: "media_dialogue",
-                  visual_clues: nextState.visual_clues
+                  visual_clues: nextState.visual_clues,
+                  media_candidate: nextState.media_candidate || null,
                 },
                 dialogue_history: history,
-                status: "questioning"
               });
 
               await replyMessage(replyToken, [{
                 type: "text",
                 text: "🎬 " + nextState.question
               }]);
-
             } else {
-              // 特定成功！
-              const mediaInfo = result as MediaInfo;
-
-              // ステータス完了へ
-              await updateSellItem(activeSellItem.id, {
-                status: "completed"
-              });
-
-              // ログ記録
-              await logUsage(userId, "media_identify_dialogue_success", {
-                media_type: mediaInfo.media_type,
-                title: mediaInfo.title
-              });
-
-              // お礼メッセージ + 評価Flex
-              await replyMessage(replyToken, [
-                { type: "text", text: "わかりました！ありがとうございます😊" },
-                buildMediaConfirmFlexMessage(mediaInfo, `dialogue_${activeSellItem.id}`)
-              ]);
+              await replyMessage(replyToken, [{
+                type: "text",
+                text: "🤔 もう少し詳しく教えてもらえますか？\n（例：出演者、ストーリー、放送局など）"
+              }]);
             }
-          } else {
-            // エラーまたは会話終了 (nullの場合)
-            // すぐに諦めず、ユーザーに入力を促す
-            await replyMessage(replyToken, [{
-              type: "text",
-              text: "🤔 うーん、まだピンときていません...\n\nもう少し詳しく教えてもらえますか？\n（例：出演者、ストーリー、放送局など）"
-            }]);
-            // ステータスは変えず、対話継続
+          }
+
+        } else if (info && info.type === "media_dialogue") {
+          // -------- メディア対話（二段階フロー） --------
+          console.log("Continuing media dialogue for item:", activeSellItem.id);
+          console.log("  extracted_info:", JSON.stringify(info));
+
+          try {
+            // ユーザーの回答を履歴に追加
+            const history = (activeSellItem.dialogue_history || []) as { role: string; text: string }[];
+            history.push({ role: "user", text: message.text });
+
+            // 保存されている候補情報を渡す
+            const storedCandidate = info.media_candidate || null;
+            console.log("  storedCandidate:", storedCandidate ? storedCandidate.title : "null");
+
+            // Geminiで対話継続（候補情報付き）
+            const result = await continueMediaDialogue(
+              info.visual_clues || "",
+              history,
+              message.text,
+              storedCandidate
+            );
+
+            console.log("  continueMediaDialogue result:", result ? JSON.stringify(result).substring(0, 200) : "null");
+
+            if (result) {
+              if ("visual_clues" in result) {
+                // まだ確定していない → 対話継続
+                const nextState = result as MediaDialogueState;
+                history.push({ role: "assistant", text: nextState.question });
+
+                await updateSellItem(activeSellItem.id, {
+                  extracted_info: {
+                    type: "media_dialogue",
+                    visual_clues: nextState.visual_clues,
+                    media_candidate: nextState.media_candidate || storedCandidate,
+                  },
+                  dialogue_history: history,
+                  status: "questioning"
+                });
+
+                await replyMessage(replyToken, [{
+                  type: "text",
+                  text: "🎬 " + nextState.question
+                }]);
+
+              } else {
+                // AIが特定した → 外部DBで補完 → 確認ステップへ
+                let mediaInfo = result as MediaInfo;
+                console.log("  Media candidate identified:", mediaInfo.title);
+
+                // 外部DB（TMDB/Jikan/iTunes）で情報補完
+                try {
+                  mediaInfo = await enrichMediaInfo(mediaInfo);
+                  console.log("  Enriched:", mediaInfo.external_source, mediaInfo.score, mediaInfo.poster_url ? "has poster" : "no poster");
+                } catch (e) {
+                  console.warn("  Enrich failed (non-critical):", e);
+                }
+
+                // media_confirm 状態に遷移（ユーザーの最終確認待ち）
+                await updateSellItem(activeSellItem.id, {
+                  extracted_info: {
+                    type: "media_confirm",
+                    visual_clues: info.visual_clues,
+                    media_candidate: storedCandidate,
+                    confirmed_media: mediaInfo,
+                  },
+                  dialogue_history: history,
+                  status: "questioning"
+                });
+
+                // 確認メッセージ（外部DB情報付き）
+                const castLine = mediaInfo.artist_or_cast ? `\n出演: ${mediaInfo.artist_or_cast}` : "";
+                const yearLine = mediaInfo.year ? ` (${mediaInfo.year})` : "";
+                const scoreLine = mediaInfo.score ? `\n評価: ${mediaInfo.score.toFixed(1)}/10` : "";
+                const genreLine = mediaInfo.genres?.length ? `\nジャンル: ${mediaInfo.genres.join(", ")}` : "";
+                const synopsisLine = mediaInfo.synopsis ? `\n\n📖 ${mediaInfo.synopsis}` : "";
+
+                const confirmMessages: any[] = [];
+                // ポスター画像があれば送信
+                if (mediaInfo.poster_url) {
+                  confirmMessages.push({
+                    type: "image",
+                    originalContentUrl: mediaInfo.poster_url,
+                    previewImageUrl: mediaInfo.poster_url,
+                  });
+                }
+                confirmMessages.push({
+                  type: "text",
+                  text: `🎬 「${mediaInfo.title}」${yearLine}${castLine}${scoreLine}${genreLine}${synopsisLine}\n\n💡 ${mediaInfo.trivia || ""}\n\nこの作品で合っていますか？\n→「はい」で評価へ\n→「違う」でやり直し`
+                });
+
+                await replyMessage(replyToken, confirmMessages);
+              }
+            } else {
+              // エラーまたは会話終了 (nullの場合)
+              // すぐに諦めず、ユーザーに入力を促す
+              await replyMessage(replyToken, [{
+                type: "text",
+                text: "🤔 うーん、まだピンときていません...\n\nもう少し詳しく教えてもらえますか？\n（例：出演者、ストーリー、放送局など）"
+              }]);
+              // ステータスは変えず、対話継続
+            }
+          } catch (dialogueError) {
+            console.error("Media dialogue error:", dialogueError);
+            // エラー時もユーザーに返信する（沈黙防止）
+            try {
+              await replyMessage(replyToken, [{
+                type: "text",
+                text: "すみません、処理中にエラーが発生しました。\nもう一度写真を送ってみてください📷"
+              }]);
+            } catch (replyErr) {
+              console.error("Fallback reply also failed:", replyErr);
+            }
           }
 
         } else {
@@ -1304,6 +1412,21 @@ async function handleMessageEvent(event: LineEvent) {
 
       const startTime = Date.now();
 
+      // LINE Loading Animation（処理中インジケータ）を送信
+      try {
+        const accessToken = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN")!;
+        await fetch("https://api.line.me/v2/bot/chat/loading", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ chatId: userId, loadingSeconds: 20 }),
+        });
+      } catch (e) {
+        console.warn("Loading animation failed (non-critical):", e);
+      }
+
       try {
         // ユーザー設定を取得
         const userContext = await getUserContext(userId);
@@ -1385,64 +1508,50 @@ async function handleMessageEvent(event: LineEvent) {
         console.log("Image intent:", intent);
 
         if (intent === "media") {
-          // ==================== メディアログフロー ====================
-          console.log("Processing as media content...");
-          const mediaInfo = await identifyMedia(base64, mimeType);
+          // ==================== メディアログフロー（二段階：対話→確定→評価） ====================
+          console.log("Processing as media content (two-stage dialogue)...");
+          const dialogueState = await identifyMedia(base64, mimeType);
 
-          if (mediaInfo) {
-            console.log("Media identification result:", mediaInfo);
+          if (dialogueState) {
+            console.log("Media dialogue started:", dialogueState.visual_clues);
 
-            // 型ガード: MediaInfo か MediaDialogueState か判定
-            if ("visual_clues" in mediaInfo) {
-              // ==================== 対話モード (特定失敗) ====================
-              const dialogueState = mediaInfo as MediaDialogueState;
+            // 常に対話モードで開始（identifyMediaは常にMediaDialogueStateを返す）
+            const supabase = getSupabaseClient();
 
-              // sell_items テーブルを流用して対話状態を保存
-              // extracted_info に type: "media_dialogue" を含める
-              const supabase = getSupabaseClient();
-
-              // 既存のセッションがあればキャンセル
-              const activeItem = await getActiveSellItem(userId);
-              if (activeItem) {
-                await updateSellItem(activeItem.id, { status: "cancelled" });
-              }
-
-              const dialogueHistory = [
-                { role: "assistant", text: dialogueState.question }
-              ];
-
-              await supabase.from("sell_items").insert({
-                line_user_id: userId,
-                status: "questioning",
-                image_summary: dialogueState.visual_clues,
-                extracted_info: {
-                  type: "media_dialogue", // 区別用フラグ
-                  visual_clues: dialogueState.visual_clues
-                },
-                dialogue_history: dialogueHistory
-              });
-
-              await logUsage(userId, "media_dialogue_start", {});
-
-              // 質問メッセージを送信
-              await replyMessage(replyToken, [{
-                type: "text",
-                text: "🎬 " + dialogueState.question
-              }]);
-
-            } else {
-              // ==================== 特定成功 (MediaInfo) ====================
-              const info = mediaInfo as MediaInfo;
-
-              await logUsage(userId, "media_identify", {
-                media_type: info.media_type,
-                title: info.title,
-                latency_ms: Date.now() - startTime,
-              });
-
-              // 評価ボタン付きFlex Messageで返信
-              await replyMessage(replyToken, [buildMediaConfirmFlexMessage(info, message.id)]);
+            // 既存のセッションがあればキャンセル
+            const activeItem = await getActiveSellItem(userId);
+            if (activeItem) {
+              await updateSellItem(activeItem.id, { status: "cancelled" });
             }
+
+            const dialogueHistory = [
+              { role: "assistant", text: dialogueState.question }
+            ];
+
+            const { error: insertError } = await supabase.from("sell_items").insert({
+              line_user_id: userId,
+              status: "questioning",
+              image_summary: dialogueState.visual_clues,
+              extracted_info: {
+                type: "media_dialogue",
+                visual_clues: dialogueState.visual_clues,
+                media_candidate: dialogueState.media_candidate || null,
+              },
+              dialogue_history: dialogueHistory
+            });
+            if (insertError) {
+              console.error("sell_items insert error:", insertError);
+            }
+
+            await logUsage(userId, "media_dialogue_start", {
+              has_candidate: !!dialogueState.media_candidate,
+            });
+
+            // 質問メッセージを送信
+            await replyMessage(replyToken, [{
+              type: "text",
+              text: "🎬 " + dialogueState.question
+            }]);
           } else {
             // メディアが特定できなかった場合 (null) → 救急箱フローにフォールバック
             console.log("Media not identified, falling back to help flow");
@@ -1480,6 +1589,17 @@ async function handleMessageEvent(event: LineEvent) {
     }
   } catch (error) {
     console.error("handleMessageEvent error:", error);
+    // 沈黙防止: エラー時もユーザーに返信する
+    try {
+      if (replyToken) {
+        await replyMessage(replyToken, [{
+          type: "text",
+          text: "⚠️ 処理中にエラーが発生しました。\nもう一度試してみてください。"
+        }]);
+      }
+    } catch (replyErr) {
+      console.error("Error fallback reply also failed:", replyErr);
+    }
   }
 }
 
@@ -1499,24 +1619,16 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
 
   // メディア履歴閲覧 (action=view_media_history)
   if (action === "view_media_history") {
-    console.log("Fetching media logs for user:", userId);
-    const supabase = getSupabaseClient();
+    console.log("Opening media log page for user:", userId);
+    const mediaUrl = `https://oyadeki-liff.deno.dev/media/${userId}`;
 
-    const { data: items, error } = await supabase
-      .from("media_logs")
-      .select("*")
-      .eq("line_user_id", userId)
-      .order("watched_at", { ascending: false })
-      .limit(20);
-
-    if (error) {
-      console.error("Media logs fetch error:", error);
-      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "エラーが発生しました。時間をおいて試してください。" }]);
-      return;
+    await logUsage(userId, "media_list", {});
+    if (event.replyToken) {
+      await replyMessage(event.replyToken, [{
+        type: "text",
+        text: `📖 視聴記録はこちら\n${mediaUrl}`,
+      }]);
     }
-
-    await logUsage(userId, "media_list", { count: items?.length || 0 });
-    if (event.replyToken) await replyMessage(event.replyToken, [buildMediaListFlexMessage(items || [])]);
     return;
   }
 
@@ -1636,25 +1748,96 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
 
     const supabase = getSupabaseClient();
     // ユーザー登録があれば取得（なければnull）
-    const { data: userCtx } = await supabase.from("user_contexts").select("user_id").eq("line_user_id", userId).single();
+    const { data: userCtx } = await supabase.from("user_contexts").select("user_id, storage_locations").eq("line_user_id", userId).single();
 
     // ユーザー登録がなくても台帳には保存する（line_user_idで紐付け）
-    const { error: insertError } = await supabase.from("ledgers").insert({
-      user_id: userCtx?.user_id, // あれば入れる
+    const { data: inserted, error: insertError } = await supabase.from("ledgers").insert({
+      user_id: userCtx?.user_id,
       line_user_id: userId,
       service_name: serviceName,
       category,
       monthly_cost: cost,
       status: 'active'
-    });
+    }).select("id").single();
 
     if (insertError) {
       console.error("Ledger insert error:", insertError);
       if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "台帳の登録に失敗しました。もう一度試してください。" }]);
     } else {
       await logUsage(userId, "ledger_confirm", { service: serviceName });
-      // 成功メッセージ
-      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: `「${serviceName}」を台帳に登録しました！✅\n\n後でお子さんが確認してくれます。` }]);
+
+      const locations: string[] = userCtx?.storage_locations || [];
+      if (inserted && locations.length > 0 && event.replyToken) {
+        // 保管場所を聞く
+        const locationButtons = locations.slice(0, 4).map((loc: string) => ({
+          type: "button",
+          style: "secondary",
+          height: "sm",
+          action: {
+            type: "postback",
+            label: loc.substring(0, 20),
+            data: `action=set_storage&id=${inserted.id}&loc=${encodeURIComponent(loc.substring(0, 30))}`,
+          },
+        }));
+        locationButtons.push({
+          type: "button",
+          style: "link",
+          height: "sm",
+          action: {
+            type: "postback",
+            label: "スキップ",
+            data: `action=set_storage&id=${inserted.id}&loc=`,
+          },
+        });
+
+        await replyMessage(event.replyToken, [
+          { type: "text", text: `「${serviceName}」を台帳に登録しました！✅` },
+          {
+            type: "flex",
+            altText: "紙はどこにしまいましたか？",
+            contents: {
+              type: "bubble",
+              body: {
+                type: "box",
+                layout: "vertical",
+                spacing: "md",
+                contents: [
+                  { type: "text", text: "📂 紙はどこにしまいましたか？", weight: "bold", size: "md" },
+                  { type: "text", text: "後で探すときに便利です", size: "xs", color: "#888888" },
+                ],
+              },
+              footer: {
+                type: "box",
+                layout: "vertical",
+                spacing: "xs",
+                contents: locationButtons,
+              },
+            },
+          },
+        ]);
+      } else {
+        if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: `「${serviceName}」を台帳に登録しました！✅\n\n後でお子さんが確認してくれます。` }]);
+      }
+    }
+    return;
+  }
+
+  // 台帳の保管場所設定 (action=set_storage)
+  if (action === "set_storage") {
+    const ledgerId = params.get("id");
+    const location = decodeURIComponent(params.get("loc") || "");
+
+    if (ledgerId && location) {
+      const supabase = getSupabaseClient();
+      await supabase
+        .from("ledgers")
+        .update({ storage_location: location })
+        .eq("id", ledgerId)
+        .eq("line_user_id", userId);
+
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: `📂「${location}」に保管ですね。記録しました！\n\n後でお子さんが確認してくれます。` }]);
+    } else {
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "👌 スキップしました。\n\n後でお子さんが確認してくれます。" }]);
     }
     return;
   }

@@ -30,7 +30,7 @@ export async function generateText(
     if (!apiKey) {
         throw new Error("GEMINI_API_KEY is not set");
     }
-    const model = options.model ?? "gemini-2.5-flash-preview-05-20";
+    const model = options.model ?? "gemini-2.5-flash";
 
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
@@ -40,7 +40,7 @@ export async function generateText(
         body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: {
-                maxOutputTokens: options.maxTokens ?? 1024,
+                maxOutputTokens: options.maxTokens ?? 2048,
                 temperature: 0.7,
             },
         }),
@@ -50,11 +50,6 @@ export async function generateText(
     if (!response.ok) {
         const errorText = await response.text();
         console.error("Gemini API error:", response.status, errorText);
-        // 失敗時はフォールバック
-        if (model === "gemini-2.5-flash-preview-05-20") {
-            console.warn("gemini-2.5-flash failed, falling back to gemini-2.0-flash");
-            return generateText(prompt, { ...options, model: "gemini-2.0-flash" });
-        }
         throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
     }
 
@@ -73,7 +68,7 @@ export async function analyzeImage(
     options: GenerateOptions = {}
 ): Promise<string> {
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = options.model ?? "gemini-2.0-flash";
+    const model = options.model ?? "gemini-2.5-flash";
 
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
@@ -90,7 +85,7 @@ export async function analyzeImage(
                 },
             ],
             generationConfig: {
-                maxOutputTokens: options.maxTokens ?? 1024,
+                maxOutputTokens: options.maxTokens ?? 2048,
                 temperature: 0.5,
             },
         }),
@@ -151,7 +146,7 @@ export async function extractLedgerInfo(
 `;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = "gemini-2.0-flash"; // Visionは2.0 Flash推奨
+    const model = "gemini-2.5-flash";
 
     const contents = [];
     if (imageBase64 && mimeType) {
@@ -224,7 +219,7 @@ export async function classifyImageIntent(
 回答: help または media または sell のみ（他の文字は含めない）`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = "gemini-2.0-flash";
+    const model = "gemini-2.5-flash";
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -240,8 +235,11 @@ export async function classifyImageIntent(
                 },
             ],
             generationConfig: {
-                maxOutputTokens: 10,
+                maxOutputTokens: 50,
                 temperature: 0.1,
+                // gemini-2.5-flash は思考モデル。分類タスクでは思考不要。
+                // thinkingBudget=0 で思考トークン消費を防ぎ、出力枠を確保。
+                thinkingConfig: { thinkingBudget: 0 },
             },
         }),
     });
@@ -260,12 +258,19 @@ export async function classifyImageIntent(
 }
 
 export interface MediaInfo {
-    media_type: "movie" | "tv_show" | "sports" | "music" | "book" | "other";
+    media_type: "movie" | "tv_show" | "anime" | "sports" | "music" | "book" | "other";
     title: string;
     subtitle?: string;        // エピソード名、対戦カードなど
     artist_or_cast?: string;  // 出演者、チーム名
     year?: number;
     trivia?: string;          // 豆知識、見どころ、受賞歴
+    // 外部DB enrichment
+    poster_url?: string;      // ポスター/カバー画像URL
+    synopsis?: string;        // あらすじ
+    score?: number;           // 外部DBの評価スコア
+    genres?: string[];        // ジャンル
+    external_url?: string;    // 外部DBのURL
+    external_source?: string; // データソース名 ("TMDB" | "MyAnimeList" | "iTunes")
 }
 
 /**
@@ -280,47 +285,44 @@ export interface MediaDialogueState {
 export type IdentifyMediaResult = MediaInfo | MediaDialogueState | null;
 
 /**
- * 画像からメディア情報を識別（対話対応版）
+ * 画像からメディア情報を識別（対話開始版）
+ * 常にMediaDialogueStateを返し、対話を通じて作品を特定する。
+ * AIの推測はmedia_candidateに格納（ユーザーには見せない）。
  */
 export async function identifyMedia(
     imageBase64: string,
     mimeType: string
-): Promise<IdentifyMediaResult> {
-    const prompt = `この画像に映っているメディア（番組・映画・スポーツ・音楽など）を特定してください。
-特定できない場合は、ユーザーに質問するための情報を抽出してください。
+): Promise<MediaDialogueState | null> {
+    const prompt = `あなたはアニメ・映画・テレビ番組・音楽・スポーツに精通したメディア鑑定士です。
+この画像に映っているメディアについて、アキネイターのようにユーザーとの対話を通じて特定していきます。
+
+【重要ルール】
+- たとえ作品がわかっても、すぐに答えを出さないでください。
+- まず画像から読み取れる視覚情報を整理し、ユーザーに確認する質問をしてください。
+- 質問にはトリビア（豆知識）を1つ交えて、会話を楽しくしてください。
+- あなたの推測（候補作品）は media_candidate に入れてください（内部データで、ユーザーには直接見せません）。
+- 質問は具体的に。「このキャラはガンダムシリーズに登場しますか？」のように作品名を挙げてください。
+- アニメキャラの場合、服装・髪型・体格・雰囲気から推測してください。
 
 【出力形式 - JSONのみ】
-以下のいずれかの形式で返してください。
-
-パターンA：作品が特定できた場合
 {
-  "identified": true,
-  "data": {
-    "media_type": "movie" | "tv_show" | "sports" | "music" | "book" | "other",
-    "title": "タイトル名",
-    "subtitle": "エピソード名や対戦カードなど（あれば）",
-    "artist_or_cast": "出演者・アーティスト・チーム名",
+  "visual_clues": "画像から読み取れる視覚情報（キャラの外見、背景、文字、色使いなど）",
+  "question": "ユーザーへの最初の質問。トリビアを交えて楽しく。例：『軍服を着た男性が映っていますね。ちなみにロボットアニメの中でも「機動戦士ガンダム」は1979年の放送開始以来、40作品以上が制作されているんですよ！この画面はガンダムシリーズでしょうか？』",
+  "media_candidate": {
+    "media_type": "anime"|"movie"|"tv_show"|"sports"|"music"|"book"|"other",
+    "title": "推測する作品タイトル",
+    "subtitle": "キャラ名やエピソード名（あれば）",
+    "artist_or_cast": "出演者・声優（わかれば）",
     "year": 2024,
-    "trivia": "この作品に関する短い豆知識や見どころ（1〜2文）"
+    "trivia": "この作品に関する豆知識（1〜2文）"
   }
 }
 
-パターンB：特定できないため、質問する場合
-{
-  "identified": false,
-  "visual_clues": "画像から読み取れる視覚情報（例：和服の男性が映っている、右上にNHKのロゴがある、xxという文字が見える）",
-  "question": "作品を絞り込むための親切な質問（例：「これは時代劇のようですね。NHKの大河ドラマですか？」、「マツコさんが映っていますが、バラエティ番組ですか？」）"
-}
-
-【判定ガイド】
-- 確信度が低い場合は、無理に特定せずパターンBを選んでください。
-- アニメの場合は、キャラクターの特徴（服装、髪型、メカなど）から具体的な作品名（例：ガンダム、ジブリなど）を推測し、質問に含めてください。
-- 質問は「はい/いいえ」または短い単語で答えられるものが望ましいです。
-
-JSONのみを返し、Markdownコードブロックは不要です。`;
+※ media_candidate は推測できない場合は null にしてください
+※ JSONのみを返し、Markdownコードブロックは不要です。`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = "gemini-2.0-flash";
+    const model = "gemini-2.5-flash";
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -337,30 +339,38 @@ JSONのみを返し、Markdownコードブロックは不要です。`;
             ],
             generationConfig: {
                 response_mime_type: "application/json",
-                temperature: 0.4,
+                temperature: 0.3,
+                // 思考トークンを無効化してレスポンス速度を改善
+                thinkingConfig: { thinkingBudget: 0 },
             },
         }),
     });
 
     if (!response.ok) {
         console.error("identifyMedia failed:", response.status);
-        return null; // APIエラー時はnull
+        return null;
     }
 
     const data = await response.json();
-    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "null";
+    // thinkingBudget=0 の場合、思考パートが入る可能性があるのでフィルタリング
+    const parts = data.candidates?.[0]?.content?.parts;
+    let jsonText = "null";
+    if (parts) {
+        for (const part of parts) {
+            if (part.text && !part.thought) {
+                jsonText = part.text;
+                break;
+            }
+        }
+    }
 
     try {
         const parsed = JSON.parse(jsonText);
-        if (parsed.identified && parsed.data && parsed.data.title) {
-            return parsed.data as MediaInfo;
-        } else if (!parsed.identified && parsed.question) {
-            return {
-                visual_clues: parsed.visual_clues || "情報不足",
-                question: parsed.question,
-            } as MediaDialogueState;
-        }
-        return null;
+        return {
+            visual_clues: parsed.visual_clues || "情報不足",
+            question: parsed.question || "この画面に映っているのは何ですか？",
+            media_candidate: parsed.media_candidate || undefined,
+        } as MediaDialogueState;
     } catch (e) {
         console.error("Failed to parse media JSON:", e);
         return null;
@@ -368,45 +378,69 @@ JSONのみを返し、Markdownコードブロックは不要です。`;
 }
 
 /**
- * 3. メディア特定対話の継続
- * ユーザーの回答をヒントに再特定を試みる
+ * 3. メディア特定対話の継続（二段階フロー対応）
+ * ユーザーの回答をヒントに再特定を試みる。
+ * ユーザーが作品名を肯定 → MediaInfo を返す（確定）
+ * まだ不明 → MediaDialogueState を返す（対話継続）
  */
 export async function continueMediaDialogue(
     visualClues: string,
     dialogueHistory: { role: string; text: string }[],
-    userReply: string
+    userReply: string,
+    mediaCandidate?: MediaInfo | null
 ): Promise<IdentifyMediaResult> {
-    const prompt = `あなたは不明なメディア作品を特定するアシスタントです。
-画像の視覚情報と、ユーザーとの対話履歴をもとに、作品名を特定してください。
+    const candidateInfo = mediaCandidate
+        ? `\nAIの現在の推測: ${JSON.stringify(mediaCandidate)}`
+        : "\nAIの推測: なし（まだ候補が絞れていない）";
+
+    const prompt = `あなたはアニメ・映画・テレビに精通したメディア鑑定士です。
+アキネイターのようにユーザーとの対話を通じて、作品を特定していきます。
 
 【現状の情報】
-視覚情報: ${visualClues}
-会話履歴: ${JSON.stringify(dialogueHistory.slice(-4))}
+視覚情報: ${visualClues}${candidateInfo}
+会話履歴: ${JSON.stringify(dialogueHistory.slice(-6))}
 ユーザーの最新の回答: "${userReply}"
 
-【タスク】
-1. ユーザーの回答をヒントに、具体的な作品名を推測してください。
-2. もし確定できなければ、すぐにあきらめず、「パターンB」で別の角度から質問を続けてください。
-3. ユーザーが「わからない」「知らない」と答えた場合は、より一般的な特徴（ジャンル、雰囲気、放送局など）を聞いてください。
+【重要ルール】
+1. ユーザーが作品名やシリーズ名を肯定した場合（「はい」「そう」「そうです」「正解」「合ってる」など）：
+   → パターンAで確定してください。AIの推測がある場合はそれを使い、なければユーザーの情報から特定してください。
+2. ユーザーがキャラ名や作品名のヒントを出した場合：
+   → あなたの知識で補完し、「○○ですね！」と確認する質問を返してください（パターンB）。
+3. ユーザーが否定した場合（「違う」「いいえ」など）：
+   → 別の候補を挙げて質問してください（パターンB）。新しい推測をmedia_candidateに入れてください。
+4. 質問にはトリビア（豆知識）を交えて会話を楽しくしてください。
+5. 2〜3回の対話で結論を目指してください。
 
 【出力形式 - JSONのみ】
-パターンA：特定できた場合（確信度が高い場合のみ）
+パターンA：ユーザーが確認・肯定した場合（確定）
 {
   "identified": true,
-  "data": { "media_type": "...", "title": "...", "subtitle": "...", "artist_or_cast": "...", "year": ..., "trivia": "..." }
+  "data": {
+    "media_type": "anime"|"tv_show"|"movie"|"sports"|"music"|"book"|"other",
+    "title": "作品名",
+    "subtitle": "キャラ名やエピソード名",
+    "artist_or_cast": "声優・出演者",
+    "year": 1979,
+    "trivia": "豆知識1〜2文"
+  }
 }
 
-パターンB：まだ特定できない場合（少しでも不明点があればこちら）
+パターンB：まだ確定していない場合（対話継続）
 {
   "identified": false,
-  "visual_clues": "${visualClues}", 
-  "question": "推測を深めるための質問（例：『主役の俳優は誰ですか？』『どのチャンネルで放送していますか？』）"
+  "visual_clues": "更新された視覚情報",
+  "question": "トリビアを交えた次の質問",
+  "media_candidate": {
+    "media_type": "...", "title": "...", "subtitle": "...",
+    "artist_or_cast": "...", "year": 0, "trivia": "..."
+  }
 }
+※ media_candidate は新しい推測がなければ null
 
 JSONのみを返してください。`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = "gemini-2.0-flash";
+    const model = "gemini-2.5-flash";
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -414,14 +448,27 @@ JSONのみを返してください。`;
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { response_mime_type: "application/json", temperature: 0.4 },
+            generationConfig: {
+                response_mime_type: "application/json",
+                temperature: 0.4,
+                thinkingConfig: { thinkingBudget: 0 },
+            },
         }),
     });
 
     if (!response.ok) return null;
 
     const data = await response.json();
-    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "null";
+    const parts = data.candidates?.[0]?.content?.parts;
+    let jsonText = "null";
+    if (parts) {
+        for (const part of parts) {
+            if (part.text && !part.thought) {
+                jsonText = part.text;
+                break;
+            }
+        }
+    }
 
     try {
         const parsed = JSON.parse(jsonText);
@@ -431,12 +478,137 @@ JSONのみを返してください。`;
             return {
                 visual_clues: parsed.visual_clues || visualClues,
                 question: parsed.question,
+                media_candidate: parsed.media_candidate || undefined,
             } as MediaDialogueState;
         }
         return null;
     } catch (e) {
         return null;
     }
+}
+
+// ==================== 外部メディアDB検索 ====================
+
+/**
+ * メディア情報を外部DBで補完する
+ * anime → Jikan (MyAnimeList), movie/tv_show → TMDB, music → iTunes
+ */
+export async function enrichMediaInfo(media: MediaInfo): Promise<MediaInfo> {
+    try {
+        switch (media.media_type) {
+            case "anime":
+                return await enrichFromJikan(media);
+            case "movie":
+                return await enrichFromTMDB(media, "movie");
+            case "tv_show":
+                return await enrichFromTMDB(media, "tv");
+            case "music":
+                return await enrichFromiTunes(media);
+            default:
+                // sports, book, other → TMDBで試す
+                return await enrichFromTMDB(media, "multi");
+        }
+    } catch (e) {
+        console.error("enrichMediaInfo failed:", e);
+        return media; // エンリッチ失敗時は元のまま返す
+    }
+}
+
+/** Jikan API (MyAnimeList) - 認証不要 */
+async function enrichFromJikan(media: MediaInfo): Promise<MediaInfo> {
+    const query = encodeURIComponent(media.title);
+    const res = await fetch(
+        `https://api.jikan.moe/v4/anime?q=${query}&limit=3`,
+        { signal: AbortSignal.timeout(5000) }
+    );
+    if (!res.ok) return media;
+
+    const data = await res.json();
+    const results = data.data;
+    if (!results?.length) return media;
+
+    // タイトルが最も一致するものを選択
+    const best = results[0];
+
+    return {
+        ...media,
+        title: best.title_japanese || best.title || media.title,
+        year: best.year || media.year,
+        artist_or_cast: media.artist_or_cast || best.studios?.map((s: any) => s.name).join(", "),
+        poster_url: best.images?.jpg?.large_image_url || best.images?.jpg?.image_url,
+        synopsis: best.synopsis?.substring(0, 200),
+        score: best.score,
+        genres: best.genres?.map((g: any) => g.name),
+        external_url: best.url,
+        external_source: "MyAnimeList",
+    };
+}
+
+/** TMDB API - Bearer token認証 */
+async function enrichFromTMDB(media: MediaInfo, type: "movie" | "tv" | "multi"): Promise<MediaInfo> {
+    const token = Deno.env.get("TMDB_API_TOKEN");
+    if (!token) return media;
+
+    const query = encodeURIComponent(media.title);
+    const endpoint = type === "multi" ? "search/multi" : `search/${type}`;
+    const res = await fetch(
+        `https://api.themoviedb.org/3/${endpoint}?query=${query}&language=ja-JP&include_adult=false`,
+        {
+            headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+            signal: AbortSignal.timeout(5000),
+        }
+    );
+    if (!res.ok) return media;
+
+    const data = await res.json();
+    const results = data.results;
+    if (!results?.length) return media;
+
+    const best = results[0];
+    const title = best.title || best.name;
+    const releaseDate = best.release_date || best.first_air_date;
+    const mediaType = best.media_type === "tv" ? "tv_show" : best.media_type === "movie" ? "movie" : media.media_type;
+
+    return {
+        ...media,
+        title: title || media.title,
+        media_type: type === "multi" ? mediaType : media.media_type,
+        year: releaseDate ? parseInt(releaseDate.substring(0, 4)) : media.year,
+        poster_url: best.poster_path ? `https://image.tmdb.org/t/p/w500${best.poster_path}` : undefined,
+        synopsis: best.overview?.substring(0, 200),
+        score: best.vote_average,
+        genres: undefined, // genre_ids → 名前解決が必要なので省略
+        external_url: `https://www.themoviedb.org/${type === "multi" ? (best.media_type || "movie") : type}/${best.id}`,
+        external_source: "TMDB",
+    };
+}
+
+/** iTunes Search API - 認証不要 */
+async function enrichFromiTunes(media: MediaInfo): Promise<MediaInfo> {
+    const query = encodeURIComponent(media.title + (media.artist_or_cast ? ` ${media.artist_or_cast}` : ""));
+    const res = await fetch(
+        `https://itunes.apple.com/search?term=${query}&country=JP&media=music&limit=3&lang=ja_jp`,
+        { signal: AbortSignal.timeout(5000) }
+    );
+    if (!res.ok) return media;
+
+    const data = await res.json();
+    const results = data.results;
+    if (!results?.length) return media;
+
+    const best = results[0];
+
+    return {
+        ...media,
+        title: best.trackName || media.title,
+        artist_or_cast: best.artistName || media.artist_or_cast,
+        subtitle: best.collectionName || media.subtitle,
+        year: best.releaseDate ? parseInt(best.releaseDate.substring(0, 4)) : media.year,
+        poster_url: best.artworkUrl100?.replace("100x100", "600x600"),
+        genres: best.primaryGenreName ? [best.primaryGenreName] : undefined,
+        external_url: best.trackViewUrl,
+        external_source: "iTunes",
+    };
 }
 
 export interface ListingInfo {
@@ -480,7 +652,7 @@ export async function generateListing(
 JSONのみを返し、Markdownコードブロックは不要です。`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = "gemini-2.0-flash";
+    const model = "gemini-2.5-flash";
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -563,7 +735,7 @@ export async function analyzeProductImage(
 - 質問は1つに絞る`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = "gemini-2.0-flash";
+    const model = "gemini-2.5-flash";
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -650,7 +822,7 @@ export async function continueSellingDialogue(
 - 「もう十分かな」と思ったら無理に聞かず出品文を作る`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = "gemini-2.0-flash";
+    const model = "gemini-2.5-flash";
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -731,5 +903,5 @@ export async function chatWithContext(
 回答:`;
 
     // 会話用のLightモデルを使用
-    return generateText(prompt, { model: "gemini-2.0-flash" });
+    return generateText(prompt, { model: "gemini-2.5-flash" });
 }

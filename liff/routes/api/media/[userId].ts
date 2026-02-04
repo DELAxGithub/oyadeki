@@ -54,4 +54,37 @@ export const handler: Handlers = {
       { headers: { "Content-Type": "application/json" } },
     );
   },
+
+  async DELETE(req, ctx) {
+    const { userId } = ctx.params;
+    const url = new URL(req.url);
+    const itemId = url.searchParams.get("id");
+
+    if (!userId || !itemId) {
+      return new Response(
+        JSON.stringify({ error: "userId and id required" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    const { error } = await supabase
+      .from("media_logs")
+      .delete()
+      .eq("id", itemId)
+      .eq("line_user_id", userId);
+
+    if (error) {
+      return new Response(
+        JSON.stringify({ error: "削除に失敗しました" }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    return new Response(
+      JSON.stringify({ success: true }),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  },
 };

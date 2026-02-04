@@ -45,10 +45,7 @@ const mediaTypeLabel: Record<string, string> = {
 function getExternalUrl(item: MediaItem): { url: string; label: string } | null {
   const q = encodeURIComponent(item.title);
   switch (item.media_type) {
-    case "anime":
-      return { url: `https://myanimelist.net/search/all?q=${q}`, label: "MAL" };
     case "movie":
-      return { url: `https://www.themoviedb.org/search?query=${q}&language=ja`, label: "TMDB" };
     case "tv_show":
       return { url: `https://www.themoviedb.org/search?query=${q}&language=ja`, label: "TMDB" };
     case "music": {
@@ -66,6 +63,27 @@ export default function MediaLogView({ userId }: MediaLogViewProps) {
   const [data, setData] = useState<MediaData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  const handleDelete = async (item: MediaItem) => {
+    if (!confirm(`「${item.title}」の記録を消しますね。\nよろしいですか？`)) return;
+    setDeleting(item.id);
+    try {
+      const res = await fetch(`/api/media/${userId}?id=${item.id}`, { method: "DELETE" });
+      if (res.ok && data) {
+        const newItems = data.items.filter((i) => i.id !== item.id);
+        const typeCounts: Record<string, number> = {};
+        for (const i of newItems) {
+          typeCounts[i.media_type] = (typeCounts[i.media_type] || 0) + 1;
+        }
+        setData({ items: newItems, totalCount: newItems.length, typeCounts });
+      }
+    } catch (_e) {
+      alert("うまく消せませんでした。もう一度試してみてください。");
+    } finally {
+      setDeleting(null);
+    }
+  };
 
   useEffect(() => {
     // Mock data for testing
@@ -225,9 +243,18 @@ export default function MediaLogView({ userId }: MediaLogViewProps) {
                           )}
                         </div>
                       </div>
-                      <span class="text-[11px] text-gray-400 whitespace-nowrap mt-1">
-                        {watchedDate}
-                      </span>
+                      <div class="flex flex-col items-end gap-1 mt-1">
+                        <span class="text-[11px] text-gray-400 whitespace-nowrap">
+                          {watchedDate}
+                        </span>
+                        <button
+                          onClick={() => handleDelete(item)}
+                          disabled={deleting === item.id}
+                          class="text-[11px] text-red-400 hover:text-red-600"
+                        >
+                          {deleting === item.id ? "..." : "削除"}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );

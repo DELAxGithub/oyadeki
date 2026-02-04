@@ -38,7 +38,7 @@
 
 ---
 
-## 📅 ロードマップ (2026-01-17 〜 02-07)
+## 📅 ロードマップ (2026-01-17 〜)
 
 ### ✅ フェーズ0: W4.5 “運用完了” (1/17–1/19)
 > ゲート: メニューから4機能に到達でき、初回チュートリアルが配信できる。
@@ -115,12 +115,36 @@
 - [x] Flex Message刷新: Green & Gold配色、警告色調整 - **完了**
 - [x] 全体デプロイ: Supabase & Deno Deploy - **完了**
 
-### 🚀 フェーズ5: 初期設定 & ソフトローンチ (2/1〜)
+### ✅ フェーズ5: 運用改善 & 保管場所機能 (2/4)
+> 実運用フィードバックを受けてのUX改善・機能追加。
+
+- [x] **バグ修正**: media_logs の CHECK制約に `anime` 追加 - **修正済 2026-02-04**
+- [x] **視聴記録LIFF化**: カルーセル(10件制限) → LIFF一覧ページに移行 - **実装済 2026-02-04**
+  - `/media/[userId]` ページ & API追加
+  - 月別グループ化、統計バッジ、外部リンク(TMDB/Apple Music/Amazon)
+- [x] **視聴記録の削除機能**: 一覧画面から個別削除 - **実装済 2026-02-04**
+- [x] **台帳LIFF一覧リンク**: カルーセル + 全件一覧LIFFリンクを同時送信 - **実装済 2026-02-04**
+- [x] **台帳: 保管場所機能** - **実装済 2026-02-04**
+  - `user_contexts.storage_locations` カラム追加
+  - `ledgers.storage_location` カラム追加
+  - LIFF設定画面で保管場所を事前登録（候補ボタン付き）
+  - 台帳登録後に保管場所選択Flex Messageを表示
+  - 台帳一覧・共有ページで保管場所を表示
+- [x] **「設定」コマンド追加**: チャットから設定画面LIFFリンクへアクセス - **実装済 2026-02-04**
+- [x] **外部リンク調整**: Filmarks → TMDB(日本語)に変更、アニメは対象外 - **調整済 2026-02-04**
+- [x] **デプロイ手順修正**: `deno task build` → `deployctl deploy` の正しい手順確立 - **2026-02-04**
+
+**✅ デプロイ完了**: 2026-02-04
+- マイグレーション: `20260204000000_add_anime_media_type.sql`, `20260204000001_add_storage_locations.sql`
+- Supabase Edge Functions: `oyadeki-webhook`
+- LIFF: https://oyadeki-liff.deno.dev (build → deploy)
+
+### 🚀 フェーズ6: ソフトローンチ (2/5〜)
 > ゲート: 本番環境での動作確認 → 家族への展開。
 
-- [ ] **初期設定 (Secrets & Webhook)**: ← **イマココ**
-- [ ] 動作確認 (自分のみ): 全機能を実機でテスト
-- [ ] ソフトローンチ: 家族1名を招待して1週間運用
+- [x] 初期設定 (Secrets & Webhook): 完了済
+- [x] 動作確認 (自分のみ): 全機能を実機テスト済
+- [ ] ソフトローンチ: 家族1名を招待して1週間運用 ← **イマココ**
 - [ ] 本番運用開始
 
 ---
@@ -172,8 +196,9 @@ LINE Developersコンソールにて以下を設定してください。
 - Webhook URL: `https://xnzlfpzecupaoilinddx.supabase.co/functions/v1/oyadeki-webhook`
 
 ### Deno Deploy (LIFF)
-- URL: https://oyadeki.deno.dev (要確認)
+- URL: https://oyadeki-liff.deno.dev
+- デプロイ手順: `cd liff && deno task build && cd .. && deployctl deploy --project=oyadeki-liff --prod --exclude='.env.example,.env.local,supabase' liff/main.ts`
 
 ---
 
-*最終更新: 2026-01-28 (v6 - デザイン適用・初期設定ガイド追加)*
+*最終更新: 2026-02-04 (v7 - 保管場所機能・視聴記録LIFF化・削除機能・設定コマンド追加)*

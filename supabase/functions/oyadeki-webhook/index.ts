@@ -952,7 +952,7 @@ async function handleMessageEvent(event: LineEvent) {
   // 画像は常に反応、テキストは「呼びかけ」のみ反応
   if ((sourceType === "group" || sourceType === "room") && message.type === "text") {
     const text = message.text?.toLowerCase() || "";
-    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳"];
+    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定"];
     const isCalled = keywords.some(k => text.includes(k));
 
     if (!isCalled) {
@@ -1061,6 +1061,16 @@ async function handleMessageEvent(event: LineEvent) {
         return;
       }
 
+      // 設定画面
+      if (lowerText === "設定") {
+        const settingsUrl = `https://oyadeki-liff.deno.dev/settings`;
+        await replyMessage(replyToken, [{
+          type: "text",
+          text: `⚙️ 設定画面はこちら\n${settingsUrl}\n\n話し方や趣味のテーマ、保管場所などを変更できます。`,
+        }]);
+        return;
+      }
+
       // 使い方
       if (lowerText === "使い方" || lowerText === "ヘルプ" || lowerText === "help") {
         await replyMessage(replyToken, [
@@ -1070,7 +1080,7 @@ async function handleMessageEvent(event: LineEvent) {
               "【困った時（VAR判定）】\n📷 スマホ画面のスクショを送ってね！\n→ 詐欺かどうか／操作方法を解説するよ！\n\n" +
               "【見たものを記録（メディアログ）】\n📺 テレビや映画の画面を送ってね！\n→ 番組を特定して記録するよ\n→「見た」で履歴が見られるよ\n\n" +
               "【メルカリ出品（パス出し）】\n📦「売る」と送ってから商品の写真を送ってね！\n→ AI店員が詳しく質問するよ（対話モード）\n\n" +
-              "【コマンド一覧】\n「台帳」「見た」「売る」「使い方」",
+              "【コマンド一覧】\n「台帳」「見た」「売る」「設定」「使い方」",
           },
           {
             type: "text",
@@ -1403,6 +1413,7 @@ async function handleMessageEvent(event: LineEvent) {
             "コマンド一覧：\n" +
             "「台帳」→ 契約情報\n" +
             "「見た」→ 視聴記録\n" +
+            "「設定」→ 環境設定\n" +
             "「使い方」→ ヘルプ",
         },
       ]);

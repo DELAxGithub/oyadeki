@@ -1071,6 +1071,128 @@ async function handleMessageEvent(event: LineEvent) {
         return;
       }
 
+      // タスク一覧
+      if (lowerText === "タスク" || lowerText === "やること" || lowerText === "todo") {
+        console.log("Fetching tasks for user:", userId);
+        const supabase = getSupabaseClient();
+
+        // 今日配信すべきタスクを取得
+        const today = new Date().toISOString().split("T")[0];
+        const { data: tasks, error } = await supabase
+          .from("tasks")
+          .select("id, title, note, phase, project, priority")
+          .eq("line_user_id", userId)
+          .eq("status", "pending")
+          .or(`scheduled_date.is.null,scheduled_date.lte.${today}`)
+          .order("priority", { ascending: false })
+          .order("sort_order", { ascending: true })
+          .limit(5);
+
+        if (error) {
+          console.error("Task fetch error:", error);
+          await replyMessage(replyToken, [{ type: "text", text: "エラーが発生しました。時間をおいて試してください。" }]);
+          return;
+        }
+
+        if (!tasks || tasks.length === 0) {
+          await replyMessage(replyToken, [{
+            type: "text",
+            text: "📋 今日のタスクはありません！\n\nゆっくり過ごしてくださいね。"
+          }]);
+          return;
+        }
+
+        await logUsage(userId, "task_list", { count: tasks.length });
+
+        // 全件数を取得
+        const { count: totalCount } = await supabase
+          .from("tasks")
+          .select("id", { count: "exact", head: true })
+          .eq("line_user_id", userId)
+          .eq("status", "pending");
+
+        // Flex Message作成
+        const taskBoxes = tasks.slice(0, 3).map((task: any, idx: number) => ({
+          type: "box",
+          layout: "horizontal",
+          contents: [
+            { type: "text", text: `${idx + 1}.`, size: "sm", color: "#06C755", flex: 0 },
+            {
+              type: "box",
+              layout: "vertical",
+              flex: 1,
+              paddingStart: "md",
+              contents: [
+                { type: "text", text: task.title, size: "sm", weight: "bold", wrap: true },
+                ...(task.note ? [{ type: "text", text: task.note, size: "xs", color: "#888888", wrap: true }] : []),
+              ],
+            },
+          ],
+          paddingBottom: "md",
+        }));
+
+        const remaining = (totalCount || 0) - 3;
+        const firstTask = tasks[0];
+
+        const flexMessage = {
+          type: "flex",
+          altText: `今日のやること（${tasks.length}件）`,
+          contents: {
+            type: "bubble",
+            header: {
+              type: "box",
+              layout: "vertical",
+              contents: [
+                { type: "text", text: "📋 今日のやること", weight: "bold", size: "lg", color: "#1A1A1A" },
+                ...(firstTask?.phase ? [{ type: "text", text: firstTask.phase, size: "xs", color: "#888888" }] : []),
+              ],
+              backgroundColor: "#F5F5F5",
+              paddingAll: "lg",
+            },
+            body: {
+              type: "box",
+              layout: "vertical",
+              contents: [
+                ...taskBoxes,
+                ...(remaining > 0 ? [{ type: "text", text: `...他 ${remaining}件`, size: "xs", color: "#888888", align: "end" }] : []),
+              ],
+              paddingAll: "lg",
+            },
+            footer: {
+              type: "box",
+              layout: "vertical",
+              spacing: "sm",
+              contents: [
+                {
+                  type: "button",
+                  style: "primary",
+                  color: "#06C755",
+                  action: {
+                    type: "postback",
+                    label: "1つ完了！",
+                    data: `action=task_complete&task_id=${firstTask?.id || ""}`,
+                    displayText: "完了しました！",
+                  },
+                },
+                {
+                  type: "button",
+                  style: "secondary",
+                  action: {
+                    type: "uri",
+                    label: "全部見る",
+                    uri: `https://oyadeki-liff.deno.dev/tasks/${userId}`,
+                  },
+                },
+              ],
+              paddingAll: "lg",
+            },
+          },
+        };
+
+        await replyMessage(replyToken, [flexMessage]);
+        return;
+      }
+
       // 使い方
       if (lowerText === "使い方" || lowerText === "ヘルプ" || lowerText === "help") {
         await replyMessage(replyToken, [
@@ -1080,7 +1202,7 @@ async function handleMessageEvent(event: LineEvent) {
               "【困った時（VAR判定）】\n📷 スマホ画面のスクショを送ってね！\n→ 詐欺かどうか／操作方法を解説するよ！\n\n" +
               "【見たものを記録（メディアログ）】\n📺 テレビや映画の画面を送ってね！\n→ 番組を特定して記録するよ\n→「見た」で履歴が見られるよ\n\n" +
               "【メルカリ出品（パス出し）】\n📦「売る」と送ってから商品の写真を送ってね！\n→ AI店員が詳しく質問するよ（対話モード）\n\n" +
-              "【コマンド一覧】\n「台帳」「見た」「売る」「設定」「使い方」",
+              "【コマンド一覧】\n「タスク」「台帳」「見た」「売る」「設定」「使い方」",
           },
           {
             type: "text",
@@ -1717,6 +1839,112 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
         type: "text",
         text: "スキップしました👌\n\nまた記録したいものがあれば、写真を送ってくださいね！",
       }]);
+    }
+    return;
+  }
+
+  // ==================== タスク関連 ====================
+
+  // タスク完了 (action=task_complete)
+  if (action === "task_complete") {
+    const taskId = params.get("task_id");
+    if (!taskId) {
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "エラー：タスクIDが見つかりません。" }]);
+      return;
+    }
+
+    const supabase = getSupabaseClient();
+
+    // タスクを完了にする
+    const { data: updatedTask, error: updateError } = await supabase
+      .from("tasks")
+      .update({ status: "done", completed_at: new Date().toISOString() })
+      .eq("id", taskId)
+      .eq("line_user_id", userId)
+      .select("title")
+      .single();
+
+    if (updateError) {
+      console.error("Task complete error:", updateError);
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "タスクの完了に失敗しました。" }]);
+      return;
+    }
+
+    await logUsage(userId, "task_complete", { task_id: taskId });
+
+    // 次のタスクを取得
+    const today = new Date().toISOString().split("T")[0];
+    const { data: nextTasks } = await supabase
+      .from("tasks")
+      .select("id, title, note")
+      .eq("line_user_id", userId)
+      .eq("status", "pending")
+      .or(`scheduled_date.is.null,scheduled_date.lte.${today}`)
+      .order("priority", { ascending: false })
+      .order("sort_order", { ascending: true })
+      .limit(1);
+
+    const nextTask = nextTasks?.[0];
+    const taskTitle = updatedTask?.title || "タスク";
+
+    if (nextTask) {
+      // 次のタスクがある場合
+      const flexMessage = {
+        type: "flex",
+        altText: "ナイス！次のタスク",
+        contents: {
+          type: "bubble",
+          body: {
+            type: "box",
+            layout: "vertical",
+            contents: [
+              { type: "text", text: `✅「${taskTitle}」完了！`, weight: "bold", size: "md", color: "#06C755" },
+              { type: "separator", margin: "md" },
+              { type: "text", text: "次のやること:", size: "xs", color: "#888888", margin: "md" },
+              { type: "text", text: nextTask.title, weight: "bold", size: "sm", wrap: true, margin: "sm" },
+              ...(nextTask.note ? [{ type: "text", text: nextTask.note, size: "xs", color: "#888888", wrap: true }] : []),
+            ],
+            paddingAll: "lg",
+          },
+          footer: {
+            type: "box",
+            layout: "vertical",
+            spacing: "sm",
+            contents: [
+              {
+                type: "button",
+                style: "primary",
+                color: "#06C755",
+                action: {
+                  type: "postback",
+                  label: "これも完了！",
+                  data: `action=task_complete&task_id=${nextTask.id}`,
+                  displayText: "完了しました！",
+                },
+              },
+              {
+                type: "button",
+                style: "link",
+                action: {
+                  type: "uri",
+                  label: "全部見る",
+                  uri: `https://oyadeki-liff.deno.dev/tasks/${userId}`,
+                },
+              },
+            ],
+            paddingAll: "lg",
+          },
+        },
+      };
+      if (event.replyToken) await replyMessage(event.replyToken, [flexMessage]);
+    } else {
+      // 全て完了
+      if (event.replyToken) {
+        await replyMessage(event.replyToken, [{
+          type: "text",
+          text: `🎉「${taskTitle}」完了！\n\n今日のタスクは全部終わりました！\nお疲れさまでした✨`,
+        }]);
+      }
     }
     return;
   }

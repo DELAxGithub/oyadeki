@@ -7,17 +7,21 @@ import * as $_app from "./routes/_app.tsx";
 import * as $api_joke from "./routes/api/joke.ts";
 import * as $api_media_userId_ from "./routes/api/media/[userId].ts";
 import * as $api_share_token_ from "./routes/api/share/[token].ts";
+import * as $api_tasks_userId_ from "./routes/api/tasks/[userId].ts";
+import * as $api_tasks_import from "./routes/api/tasks/import.ts";
 import * as $api_user_context from "./routes/api/user-context.ts";
 import * as $greet_name_ from "./routes/greet/[name].tsx";
 import * as $index from "./routes/index.tsx";
 import * as $media_userId_ from "./routes/media/[userId].tsx";
 import * as $settings_index from "./routes/settings/index.tsx";
 import * as $share_token_ from "./routes/share/[token].tsx";
+import * as $tasks_userId_ from "./routes/tasks/[userId].tsx";
 import * as $Counter from "./islands/Counter.tsx";
 import * as $LiffApp from "./islands/LiffApp.tsx";
 import * as $MediaLogView from "./islands/MediaLogView.tsx";
 import * as $SettingsForm from "./islands/SettingsForm.tsx";
 import * as $ShareView from "./islands/ShareView.tsx";
+import * as $TaskListView from "./islands/TaskListView.tsx";
 import type { Manifest } from "$fresh/server.ts";
 
 const manifest = {
@@ -27,12 +31,15 @@ const manifest = {
     "./routes/api/joke.ts": $api_joke,
     "./routes/api/media/[userId].ts": $api_media_userId_,
     "./routes/api/share/[token].ts": $api_share_token_,
+    "./routes/api/tasks/[userId].ts": $api_tasks_userId_,
+    "./routes/api/tasks/import.ts": $api_tasks_import,
     "./routes/api/user-context.ts": $api_user_context,
     "./routes/greet/[name].tsx": $greet_name_,
     "./routes/index.tsx": $index,
     "./routes/media/[userId].tsx": $media_userId_,
     "./routes/settings/index.tsx": $settings_index,
     "./routes/share/[token].tsx": $share_token_,
+    "./routes/tasks/[userId].tsx": $tasks_userId_,
   },
   islands: {
     "./islands/Counter.tsx": $Counter,
@@ -40,6 +47,7 @@ const manifest = {
     "./islands/MediaLogView.tsx": $MediaLogView,
     "./islands/SettingsForm.tsx": $SettingsForm,
     "./islands/ShareView.tsx": $ShareView,
+    "./islands/TaskListView.tsx": $TaskListView,
   },
   baseUrl: import.meta.url,
 } satisfies Manifest;

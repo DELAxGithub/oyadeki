@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 
 interface TaskItem {
   id: string;
@@ -41,6 +41,10 @@ export default function TaskListView({ userId }: TaskListViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [selectedTask, setSelectedTask] = useState<TaskItem | null>(null);
+  const [editingNote, setEditingNote] = useState("");
+  const [savingNote, setSavingNote] = useState(false);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
 
   // フィルタ状態
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "done">(
@@ -212,6 +216,41 @@ export default function TaskListView({ userId }: TaskListViewProps) {
     }
   };
 
+  const openDetail = (task: TaskItem) => {
+    setSelectedTask(task);
+    setEditingNote(task.note || "");
+  };
+
+  const handleSaveNote = async () => {
+    if (!selectedTask || !data) return;
+    const newNote = editingNote.trim() || null;
+    if (newNote === (selectedTask.note || null)) return;
+
+    setSavingNote(true);
+    try {
+      const res = await fetch(`/api/tasks/${userId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: selectedTask.id,
+          updates: { note: newNote },
+        }),
+      });
+
+      if (res.ok) {
+        const updatedItems = data.items.map((t) =>
+          t.id === selectedTask.id ? { ...t, note: newNote } : t
+        );
+        setData({ ...data, items: updatedItems });
+        setSelectedTask({ ...selectedTask, note: newNote });
+      }
+    } catch (_e) {
+      alert("保存に失敗しました");
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
   if (loading) {
     return (
       <div class="flex flex-col gap-4 items-center justify-center min-h-screen bg-background-muted">
@@ -313,24 +352,19 @@ export default function TaskListView({ userId }: TaskListViewProps) {
 
         {/* プロジェクト切替 */}
         {data.projects.length > 1 && (
-          <div class="flex gap-2 flex-wrap">
-            {[null, ...data.projects].map((p) => (
-              <button
-                key={p || "__all__"}
-                onClick={() => {
-                  setProjectFilter(p);
-                  setPhaseFilter(null);
-                }}
-                class={`px-3 py-2 text-sm font-medium rounded-lg border transition-colors ${
-                  projectFilter === p
-                    ? "bg-primary text-white border-primary"
-                    : "bg-white text-gray-700 border-gray-200"
-                }`}
-              >
-                {p || "全て"}
-              </button>
+          <select
+            value={projectFilter || ""}
+            onChange={(e) => {
+              setProjectFilter((e.target as HTMLSelectElement).value || null);
+              setPhaseFilter(null);
+            }}
+            class="w-full px-4 py-3 text-sm font-medium rounded-xl border border-gray-200 bg-white text-gray-800"
+          >
+            <option value="">全プロジェクト ({data.totalCount}件)</option>
+            {data.projects.map((p) => (
+              <option key={p} value={p}>{p}</option>
             ))}
-          </div>
+          </select>
         )}
 
         {/* フィルタ */}
@@ -396,16 +430,20 @@ export default function TaskListView({ userId }: TaskListViewProps) {
                 return (
                   <div
                     key={task.id}
-                    class={`bg-white rounded-xl border p-4 shadow-sm transition-all ${
+                    class={`bg-white rounded-xl border p-4 shadow-sm transition-all cursor-pointer active:scale-[0.98] ${
                       isDone
                         ? "border-gray-100 opacity-60"
                         : "border-gray-200"
                     }`}
+                    onClick={() => openDetail(task)}
                   >
                     <div class="flex items-start gap-3">
                       {/* チェックボックス */}
                       <button
-                        onClick={() => handleToggle(task)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggle(task);
+                        }}
                         disabled={updating === task.id}
                         class="text-xl mt-0.5 hover:scale-110 transition-transform disabled:opacity-50"
                       >
@@ -423,7 +461,7 @@ export default function TaskListView({ userId }: TaskListViewProps) {
                           {task.title}
                         </h3>
                         {task.note && (
-                          <p class="text-xs text-gray-500 mt-0.5">
+                          <p class="text-xs text-gray-500 mt-0.5 truncate">
                             {task.note}
                           </p>
                         )}
@@ -464,6 +502,136 @@ export default function TaskListView({ userId }: TaskListViewProps) {
           <p class="text-xs text-gray-400">Powered by Oyadeki</p>
         </div>
       </div>
+
+      {/* 詳細モーダル */}
+      {selectedTask && (
+        <div
+          class="fixed inset-0 bg-black/40 z-50 flex items-end justify-center"
+          onClick={() => setSelectedTask(null)}
+        >
+          <div
+            class="bg-white rounded-t-2xl w-full max-w-2xl min-h-[75vh] max-h-[90vh] overflow-y-auto animate-slide-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* モーダルヘッダー */}
+            <div class="sticky top-0 bg-white border-b border-gray-100 px-5 py-3 flex items-center justify-between rounded-t-2xl">
+              <button
+                onClick={() => setSelectedTask(null)}
+                class="text-sm text-gray-500 px-2 py-1"
+              >
+                閉じる
+              </button>
+              <div class="w-10 h-1 bg-gray-300 rounded-full absolute left-1/2 -translate-x-1/2 top-2" />
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleToggle(selectedTask);
+                  setSelectedTask(null);
+                }}
+                class={`text-sm font-medium px-3 py-1 rounded-lg ${
+                  selectedTask.status === "done"
+                    ? "bg-gray-100 text-gray-600"
+                    : "bg-primary text-white"
+                }`}
+              >
+                {selectedTask.status === "done" ? "未完了に戻す" : "完了にする"}
+              </button>
+            </div>
+
+            <div class="px-5 py-4 space-y-4">
+              {/* タイトル */}
+              <div>
+                <h2 class="text-lg font-bold text-gray-800">
+                  {statusEmoji[selectedTask.status] || "⬜"}{" "}
+                  {selectedTask.title}
+                </h2>
+              </div>
+
+              {/* 詳細情報 */}
+              <div class="space-y-2">
+                {selectedTask.project && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-gray-400 w-20">プロジェクト</span>
+                    <span class="text-gray-700">{selectedTask.project}</span>
+                  </div>
+                )}
+                {selectedTask.phase && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-gray-400 w-20">フェーズ</span>
+                    <span class="text-gray-700">{selectedTask.phase}</span>
+                  </div>
+                )}
+                {selectedTask.assignee && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-gray-400 w-20">担当</span>
+                    <span class="px-2 py-0.5 bg-blue-50 text-blue-600 rounded text-xs">
+                      👤 {selectedTask.assignee}
+                    </span>
+                  </div>
+                )}
+                {selectedTask.due_date && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-gray-400 w-20">期限</span>
+                    <span class="text-gray-700">📅 {selectedTask.due_date}</span>
+                  </div>
+                )}
+                {selectedTask.scheduled_date && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-gray-400 w-20">予定日</span>
+                    <span class="text-gray-700">🔔 {selectedTask.scheduled_date}</span>
+                  </div>
+                )}
+                {selectedTask.priority > 0 && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-gray-400 w-20">優先度</span>
+                    <span class={`text-xs px-2 py-0.5 rounded font-medium ${
+                      selectedTask.priority > 5
+                        ? "bg-red-50 text-red-500"
+                        : "bg-gray-100 text-gray-600"
+                    }`}>
+                      {selectedTask.priority > 5 ? "高" : "通常"} ({selectedTask.priority})
+                    </span>
+                  </div>
+                )}
+                {selectedTask.completed_at && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-gray-400 w-20">完了日</span>
+                    <span class="text-gray-700">
+                      {new Date(selectedTask.completed_at).toLocaleDateString("ja-JP")}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* メモ編集 */}
+              <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">
+                  メモ
+                </label>
+                <textarea
+                  ref={noteRef}
+                  value={editingNote}
+                  onInput={(e) =>
+                    setEditingNote((e.target as HTMLTextAreaElement).value)
+                  }
+                  placeholder="メモを入力..."
+                  class="w-full px-3 py-2 text-sm border border-gray-200 rounded-xl bg-gray-50 focus:bg-white focus:border-primary focus:outline-none resize-y"
+                  rows={6}
+                />
+                {editingNote.trim() !== (selectedTask.note || "") && (
+                  <button
+                    onClick={handleSaveNote}
+                    disabled={savingNote}
+                    class="mt-2 w-full py-2 text-sm font-medium rounded-xl bg-primary text-white disabled:opacity-50"
+                  >
+                    {savingNote ? "保存中..." : "メモを保存"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

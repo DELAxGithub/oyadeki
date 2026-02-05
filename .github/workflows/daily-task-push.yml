@@ -12,10 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Push daily tasks to LINE
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
+          # Trim whitespace from secrets
+          url=$(echo "$SUPABASE_URL" | tr -d '[:space:]')
+          key=$(echo "$SUPABASE_SERVICE_ROLE_KEY" | tr -d '[:space:]')
+
           response=$(curl -s -w "\n%{http_code}" -X POST \
-            "${{ secrets.SUPABASE_URL }}/functions/v1/daily-task-push" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            "${url}/functions/v1/daily-task-push" \
+            -H "Authorization: Bearer ${key}" \
             -H "Content-Type: application/json")
 
           http_code=$(echo "$response" | tail -n1)

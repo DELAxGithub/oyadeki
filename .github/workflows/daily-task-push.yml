@@ -1,0 +1,30 @@
+name: Daily Task Push
+
+on:
+  schedule:
+    # UTC 23:00 = JST 08:00 (毎朝8時)
+    - cron: '0 23 * * *'
+  workflow_dispatch:
+    # 手動実行用（テストや緊急時に使用）
+
+jobs:
+  push-tasks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push daily tasks to LINE
+        run: |
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ secrets.SUPABASE_URL }}/functions/v1/daily-task-push" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json")
+
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+
+          echo "Response: $body"
+          echo "HTTP Status: $http_code"
+
+          if [ "$http_code" -ge 400 ]; then
+            echo "::error::Edge Function failed with status $http_code"
+            exit 1
+          fi

@@ -105,6 +105,13 @@ npx supabase functions deploy daily-task-push --no-verify-jwt
 ```
 
 ### 残り作業
-- [ ] daily-task-push のcron設定（毎朝8時）
+- [x] daily-task-push のcron設定（毎朝8時）→ GitHub Actions
 - [ ] shigodeki側のJSONエクスポート機能
 - [ ] 実運用テスト
+
+### GitHub Actions (cron)
+`.github/workflows/daily-task-push.yml` で毎朝8時JST (UTC 23:00) に実行。
+
+**必要なSecrets**:
+- `SUPABASE_URL`: Supabase プロジェクトURL
+- `SUPABASE_SERVICE_ROLE_KEY`: サービスロールキー

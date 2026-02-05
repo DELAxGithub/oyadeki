@@ -271,27 +271,9 @@ export default function TaskListView({ userId }: TaskListViewProps) {
         <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
           <div class="flex items-center justify-center gap-2 mb-2">
             <span class="text-2xl">📋</span>
-            {data.projects.length > 1 ? (
-              <select
-                value={projectFilter || ""}
-                onChange={(e) => {
-                  const val = (e.target as HTMLSelectElement).value || null;
-                  setProjectFilter(val);
-                  setPhaseFilter(null);
-                }}
-                class="text-lg font-bold text-gray-800 bg-transparent border-none focus:outline-none appearance-none pr-6 cursor-pointer"
-                style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23999' d='M6 8L1 3h10z'/%3E%3C/svg%3E\")", backgroundRepeat: "no-repeat", backgroundPosition: "right center" }}
-              >
-                <option value="">全プロジェクト</option>
-                {data.projects.map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
-            ) : (
-              <h1 class="text-lg font-bold text-gray-800">
-                {data.projects[0] || "タスク一覧"}
-              </h1>
-            )}
+            <h1 class="text-lg font-bold text-gray-800">
+              {projectFilter || data.projects[0] || "タスク一覧"}
+            </h1>
           </div>
 
           {/* 進捗バー */}
@@ -328,6 +310,28 @@ export default function TaskListView({ userId }: TaskListViewProps) {
             ))}
           </div>
         </div>
+
+        {/* プロジェクト切替 */}
+        {data.projects.length > 1 && (
+          <div class="flex gap-2 flex-wrap">
+            {[null, ...data.projects].map((p) => (
+              <button
+                key={p || "__all__"}
+                onClick={() => {
+                  setProjectFilter(p);
+                  setPhaseFilter(null);
+                }}
+                class={`px-3 py-2 text-sm font-medium rounded-lg border transition-colors ${
+                  projectFilter === p
+                    ? "bg-primary text-white border-primary"
+                    : "bg-white text-gray-700 border-gray-200"
+                }`}
+              >
+                {p || "全て"}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* フィルタ */}
         <div class="flex gap-2 flex-wrap">

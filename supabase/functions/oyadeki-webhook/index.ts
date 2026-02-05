@@ -952,7 +952,7 @@ async function handleMessageEvent(event: LineEvent) {
   // 画像は常に反応、テキストは「呼びかけ」のみ反応
   if ((sourceType === "group" || sourceType === "room") && message.type === "text") {
     const text = message.text?.toLowerCase() || "";
-    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定"];
+    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定", "タスク", "やること"];
     const isCalled = keywords.some(k => text.includes(k));
 
     if (!isCalled) {
@@ -1096,8 +1096,36 @@ async function handleMessageEvent(event: LineEvent) {
 
         if (!tasks || tasks.length === 0) {
           await replyMessage(replyToken, [{
-            type: "text",
-            text: "📋 今日のタスクはありません！\n\nゆっくり過ごしてくださいね。"
+            type: "flex",
+            altText: "今日のタスクはありません",
+            contents: {
+              type: "bubble",
+              body: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                  { type: "text", text: "🎉 今日のタスクはありません！", weight: "bold", size: "md" },
+                  { type: "text", text: "ゆっくり過ごしてくださいね。", size: "sm", color: "#888888", margin: "md" },
+                ],
+                paddingAll: "lg",
+              },
+              footer: {
+                type: "box",
+                layout: "vertical",
+                contents: [
+                  {
+                    type: "button",
+                    style: "secondary",
+                    action: {
+                      type: "uri",
+                      label: "一覧を見る",
+                      uri: `https://oyadeki-liff.deno.dev/tasks/${userId}`,
+                    },
+                  },
+                ],
+                paddingAll: "lg",
+              },
+            },
           }]);
           return;
         }

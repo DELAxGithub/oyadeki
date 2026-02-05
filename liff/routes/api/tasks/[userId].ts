@@ -97,11 +97,22 @@ export const handler: Handlers = {
 
     const tasks = (items || []) as TaskItem[];
 
-    // 集計
-    const { data: statsData } = await supabase
+    // 集計（projectフィルタも反映）
+    let statsQuery = supabase
       .from("tasks")
       .select("status, project, phase")
       .eq("line_user_id", userId);
+    if (project) {
+      statsQuery = statsQuery.eq("project", project);
+    }
+    const { data: statsData } = await statsQuery;
+
+    // 全プロジェクト一覧は常にフィルタなしで取得
+    const { data: allProjectsData } = await supabase
+      .from("tasks")
+      .select("project")
+      .eq("line_user_id", userId);
+    const allProjects = [...new Set((allProjectsData || []).map((t) => t.project).filter(Boolean))];
 
     const stats = statsData || [];
     const totalCount = stats.length;
@@ -110,8 +121,8 @@ export const handler: Handlers = {
     ).length;
     const pendingCount = totalCount - doneCount;
 
-    // プロジェクト一覧
-    const projects = [...new Set(stats.map((t) => t.project).filter(Boolean))];
+    // プロジェクト一覧（常に全件）
+    const projects = allProjects;
 
     // フェーズ別カウント
     const phaseCounts: Record<string, { total: number; done: number }> = {};

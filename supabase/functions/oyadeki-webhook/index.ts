@@ -3,7 +3,7 @@ import { encode as encodeBase64 } from "https://deno.land/std@0.177.0/encoding/b
 // import { Image } from "https://deno.land/x/imagescript@1.2.15/mod.ts"; // Removed due to boot failure
 import { corsHeaders } from "../_shared/cors.ts";
 import { verifySignature } from "../_shared/line-signature.ts";
-import { isDuplicate } from "../_shared/dedup.ts";
+import { isDuplicate, isDuplicateAction } from "../_shared/dedup.ts";
 import { logUsage, getUserContext, UserContext } from "../_shared/supabase-client.ts";
 import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, MediaDialogueState, IdentifyMediaResult, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, continueMediaDialogue, chatWithContext, enrichMediaInfo } from "../_shared/gemini-client.ts";
 import { getSupabaseClient } from "../_shared/supabase-client.ts";
@@ -21,6 +21,8 @@ const TIMEOUT_MS = 3000;
 interface LineEvent {
   type: string;
   replyToken?: string;
+  webhookEventId?: string;
+  timestamp?: number;
   source: {
     type: "user" | "group" | "room";
     userId: string;
@@ -416,175 +418,6 @@ function generateShareToken(): string {
   return token;
 }
 
-/**
- * 台帳一覧用Flex Message（共有ボタン付き）
- */
-function buildLedgerListFlexMessage(items: any[], includeShareButton: boolean = true) {
-  // アイテム数が多い場合は先頭10件に制限 (カルーセル上限)
-  const displayItems = items.slice(0, 10);
-
-  // 7日以上前の日付
-  const sevenDaysAgo = new Date();
-  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-  const bubbles = displayItems.map((item) => {
-    const footerContents: unknown[] = [];
-
-    // 未確認チェック
-    const lastConfirmed = item.last_confirmed_at ? new Date(item.last_confirmed_at) : null;
-    const isUnconfirmed = !lastConfirmed || lastConfirmed < sevenDaysAgo;
-
-    // 確認ボタン
-    footerContents.push({
-      type: "button",
-      style: isUnconfirmed ? "primary" : "secondary",
-      height: "sm",
-      action: {
-        type: "postback",
-        label: isUnconfirmed ? "⚠️ 確認する" : "✅ 確認済み",
-        data: `action=confirm_ledger&id=${item.id}`
-      }
-    });
-
-    // ヘッダー部分（未確認バッジ付き）
-    const headerContents: unknown[] = [
-      { type: "text", text: "📑", size: "md" },
-      { type: "text", text: item.category || "その他", size: "xs", color: "#888888", margin: "sm", offsetBottom: "2px" }
-    ];
-
-    if (isUnconfirmed) {
-      headerContents.push({
-        type: "text",
-        text: "未確認",
-        size: "xs",
-        color: "#FFFFFF",
-        backgroundColor: "#E65100",
-        margin: "sm",
-        offsetBottom: "2px",
-        decoration: "none"
-      });
-    }
-
-    return {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        backgroundColor: isUnconfirmed ? "#FFF8E1" : "#FFFFFF",
-        contents: [
-          {
-            type: "box",
-            layout: "horizontal",
-            contents: headerContents,
-            alignItems: "center"
-          },
-          { type: "text", text: item.service_name, weight: "bold", size: "xl", margin: "sm", wrap: true },
-          {
-            type: "box", layout: "vertical", margin: "md", spacing: "sm",
-            contents: [
-              {
-                type: "box", layout: "horizontal",
-                contents: [
-                  { type: "text", text: "月額", size: "sm", color: "#888888", flex: 2 },
-                  { type: "text", text: item.monthly_cost ? `¥${item.monthly_cost.toLocaleString()}` : "不明", size: "sm", align: "end", flex: 5 }
-                ]
-              },
-              {
-                type: "box", layout: "horizontal",
-                contents: [
-                  { type: "text", text: "ID等", size: "sm", color: "#888888", flex: 2 },
-                  { type: "text", text: item.account_identifier || "-", size: "sm", align: "end", flex: 5, wrap: true }
-                ]
-              },
-              {
-                type: "box", layout: "horizontal",
-                contents: [
-                  { type: "text", text: "メモ", size: "sm", color: "#888888", flex: 2 },
-                  { type: "text", text: item.note || "-", size: "sm", align: "end", flex: 5, wrap: true }
-                ]
-              },
-              ...(item.storage_location ? [{
-                type: "box", layout: "horizontal",
-                contents: [
-                  { type: "text", text: "保管", size: "sm", color: "#888888", flex: 2 },
-                  { type: "text", text: `📂 ${item.storage_location}`, size: "sm", align: "end", flex: 5, wrap: true }
-                ]
-              }] : []),
-            ]
-          }
-        ]
-      },
-      footer: {
-        type: "box",
-        layout: "vertical",
-        spacing: "sm",
-        contents: footerContents
-      },
-      styles: {
-        footer: { separator: true }
-      }
-    };
-  });
-
-  // 共有ボタン付きサマリーバブルを先頭に追加
-  if (includeShareButton && items.length > 0) {
-    const total = items.reduce((sum: number, item: any) => sum + (item.monthly_cost || 0), 0);
-    const summaryBubble = {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        contents: [
-          { type: "text", text: "📊 台帳サマリー", weight: "bold", size: "lg" },
-          { type: "separator", margin: "md" },
-          {
-            type: "box", layout: "vertical", margin: "md", spacing: "sm",
-            contents: [
-              { type: "text", text: `登録件数: ${items.length}件`, size: "md" },
-              { type: "text", text: `月額合計: ¥${total.toLocaleString()}`, size: "md", weight: "bold", color: "#06C755" },
-            ]
-          }
-        ]
-      },
-      footer: {
-        type: "box",
-        layout: "vertical",
-        spacing: "sm",
-        contents: [
-          {
-            type: "button",
-            style: "primary",
-            action: {
-              type: "postback",
-              label: "🔗 グループに共有",
-              data: "action=share_ledger"
-            }
-          },
-          {
-            type: "button",
-            style: "secondary",
-            action: {
-              type: "postback",
-              label: "📥 エクスポート",
-              data: "action=export_ledger"
-            }
-          }
-        ]
-      }
-    };
-    bubbles.unshift(summaryBubble);
-  }
-
-  return {
-    type: "flex",
-    altText: "契約台帳リスト",
-    contents: {
-      type: "carousel",
-      contents: bubbles
-    }
-  };
-}
-
 // ==================== メディアログ関連 ====================
 
 const mediaTypeLabels: Record<string, string> = {
@@ -704,61 +537,6 @@ function buildMediaConfirmFlexMessage(media: MediaInfo) {
 }
 
 // ==================== 台帳関連（既存） ====================
-
-/**
- * グループ共有用サマリーメッセージ
- */
-function buildGroupShareMessage(items: any[], shareUrl: string, expiresAt: Date) {
-  const total = items.reduce((sum: number, item: any) => sum + (item.monthly_cost || 0), 0);
-  const serviceList = items.slice(0, 5).map((i: any) =>
-    `・${i.service_name} (${i.monthly_cost ? "¥" + i.monthly_cost.toLocaleString() : "不明"})`
-  ).join("\n");
-  const moreText = items.length > 5 ? `\n...他${items.length - 5}件` : "";
-
-  const expiryText = `${expiresAt.getMonth() + 1}/${expiresAt.getDate()}まで有効`;
-
-  return {
-    type: "flex",
-    altText: "契約台帳サマリー",
-    contents: {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        contents: [
-          { type: "text", text: "📑 契約台帳サマリー", weight: "bold", size: "lg" },
-          { type: "separator", margin: "md" },
-          {
-            type: "box", layout: "vertical", margin: "md", spacing: "sm",
-            contents: [
-              { type: "text", text: `登録件数: ${items.length}件`, size: "sm" },
-              { type: "text", text: `月額合計: 約¥${total.toLocaleString()}`, size: "md", weight: "bold" },
-              { type: "separator", margin: "md" },
-              { type: "text", text: serviceList + moreText, size: "sm", wrap: true, margin: "md" }
-            ]
-          },
-          { type: "text", text: `⏰ ${expiryText}`, size: "xs", color: "#888888", margin: "md" }
-        ]
-      },
-      footer: {
-        type: "box",
-        layout: "vertical",
-        spacing: "sm",
-        contents: [
-          {
-            type: "button",
-            style: "primary",
-            action: {
-              type: "uri",
-              label: "📋 詳細を見る",
-              uri: shareUrl
-            }
-          }
-        ]
-      }
-    }
-  };
-}
 
 /**
  * 出品モードかどうかを確認（5分以内にsell_mode_startがあるか）
@@ -1002,62 +780,24 @@ async function handleMessageEvent(event: LineEvent) {
         return;
       }
 
-      // 台帳閲覧
+      // 台帳モード
       if (lowerText === "台帳" || lowerText === "契約台帳" || lowerText.includes("ledger")) {
-        console.log("Fetching ledger for user:", userId);
-        const supabase = getSupabaseClient();
+        await logUsage(userId, "ledger_mode_trigger", {});
 
-        // ユーザーIDに紐づく台帳を取得
-        const { data: items, error } = await supabase
-          .from("ledgers")
-          .select("*")
-          .eq("line_user_id", userId) // LINEユーザーIDで検索 (もし共有機能でグループID等を使う場合は調整が必要)
-          .eq("status", "active")
-          .order("created_at", { ascending: false });
-
-        if (error) {
-          console.error("Ledger fetch error:", error);
-          await replyMessage(replyToken, [{ type: "text", text: "エラーが発生しました。時間をおいて試してください。" }]);
-          return;
-        }
-
-        if (!items || items.length === 0) {
-          await replyMessage(replyToken, [{
-            type: "text",
-            text: "📭 台帳はまだ空です。\n\n契約書や請求書の写真を送って、「台帳に登録」ボタンを押すと追加できますよ！"
-          }]);
-          return;
-        }
-
-        await logUsage(userId, "ledger_list", { count: items.length });
-
-        // グループの場合はサマリーのみ
-        if (sourceType === "group" || sourceType === "room") {
-          const total = items.reduce((sum: number, item: any) => sum + (item.monthly_cost || 0), 0);
-          const serviceList = items.map((i: any) => `- ${i.service_name} (${i.monthly_cost ? "¥" + i.monthly_cost.toLocaleString() : "不明"})`).join("\n");
-
-          await replyMessage(replyToken, [{
-            type: "text",
-            text: `📑 **契約台帳サマリー**\n\n登録件数: ${items.length}件\n月額合計: 約¥${total.toLocaleString()}\n\n${serviceList}\n\n※詳細は個人のトーク画面で「台帳」と打つと確認できます。`
-          }]);
-        } else {
-          // 個人チャットはカルーセル + 一覧リンク
-          const supabase2 = getSupabaseClient();
-          const token = generateShareToken();
-          const expiresAt = new Date();
-          expiresAt.setDate(expiresAt.getDate() + 30);
-          await supabase2.from("ledger_shares").insert({
-            line_user_id: userId,
-            token,
-            expires_at: expiresAt.toISOString(),
-          });
-          const fullListUrl = `https://oyadeki-liff.deno.dev/share/${token}`;
-
-          await replyMessage(replyToken, [
-            buildLedgerListFlexMessage(items),
-            { type: "text", text: `📋 全件一覧はこちら\n${fullListUrl}` },
-          ]);
-        }
+        await replyMessage(replyToken, [{
+          type: "template",
+          altText: "契約台帳メニュー",
+          template: {
+            type: "buttons",
+            title: "📑 契約台帳",
+            text: "契約書や請求書の写真を送ると\nAIが内容を読み取って登録します。",
+            actions: [
+              { type: "cameraRoll", label: "ライブラリから写真を選ぶ" },
+              { type: "camera", label: "カメラで撮る" },
+              { type: "postback", label: "📋 登録済みの台帳を見る", data: "action=view_ledger_list" }
+            ]
+          }
+        }]);
         return;
       }
 
@@ -1772,7 +1512,11 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
   const data = event.postback?.data ?? "";
   const params = new URLSearchParams(data);
 
-  // 下書きコピー処理は廃止（メディアログに置き換え）
+  // ボタン連打ガード（同一ユーザー+同一アクションを10秒間ブロック）
+  if (isDuplicateAction(userId, data)) {
+    console.log("Duplicate action blocked:", userId, data);
+    return;
+  }
 
   const action = params.get("action");
 
@@ -1979,6 +1723,54 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
 
   // ==================== 台帳関連（既存） ====================
 
+  // 台帳一覧表示 (action=view_ledger_list)
+  if (action === "view_ledger_list") {
+    console.log("Fetching ledger for user:", userId);
+    const supabase = getSupabaseClient();
+
+    const { data: items, error } = await supabase
+      .from("ledgers")
+      .select("*")
+      .eq("line_user_id", userId)
+      .eq("status", "active")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Ledger fetch error:", error);
+      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "エラーが発生しました。時間をおいて試してください。" }]);
+      return;
+    }
+
+    if (!items || items.length === 0) {
+      if (event.replyToken) await replyMessage(event.replyToken, [{
+        type: "text",
+        text: "📭 台帳はまだ空です。\n\n契約書や請求書の写真を送ると、AIが内容を読み取って登録できますよ！"
+      }]);
+      return;
+    }
+
+    await logUsage(userId, "ledger_list", { count: items.length });
+
+    const total = items.reduce((sum: number, item: any) => sum + (item.monthly_cost || 0), 0);
+
+    const supabase2 = getSupabaseClient();
+    const token = generateShareToken();
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30);
+    await supabase2.from("ledger_shares").insert({
+      line_user_id: userId,
+      token,
+      expires_at: expiresAt.toISOString(),
+    });
+    const listUrl = `https://oyadeki-liff.deno.dev/share/${token}`;
+
+    if (event.replyToken) await replyMessage(event.replyToken, [{
+      type: "text",
+      text: `📑 契約台帳\n\n${items.length}件 / 月額合計 ¥${total.toLocaleString()}\n\n👇 タップして一覧を開く\n${listUrl}`
+    }]);
+    return;
+  }
+
   // 台帳登録提案 (action=propose_ledger)
   if (action === "propose_ledger") {
     const messageId = params.get("msgId");
@@ -2128,114 +1920,6 @@ async function handlePostbackEvent(event: LineEvent & { postback?: { data: strin
     return;
   }
 
-  // 台帳共有リンク作成 (action=share_ledger)
-  if (action === "share_ledger") {
-    const supabase = getSupabaseClient();
-
-    // ユーザーの台帳を取得
-    const { data: items } = await supabase
-      .from("ledgers")
-      .select("*")
-      .eq("line_user_id", userId)
-      .eq("status", "active");
-
-    if (!items || items.length === 0) {
-      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "共有できる台帳がありません。" }]);
-      return;
-    }
-
-    // 共有トークン生成
-    const token = generateShareToken();
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 30); // 30日後
-
-    // グループIDを取得（グループからの呼び出しの場合）
-    const groupId = event.source.groupId || null;
-
-    // 共有レコード作成
-    await supabase.from("ledger_shares").insert({
-      line_user_id: userId,
-      group_id: groupId,
-      token,
-      expires_at: expiresAt.toISOString()
-    });
-
-    await logUsage(userId, "ledger_share_create", { token, expires_days: 30 });
-
-    // 共有URL
-    const shareUrl = `https://oyadeki-liff.deno.dev/share/${token}`;
-
-    // グループの場合はグループにサマリーを送信
-    if (groupId) {
-      const accessToken = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN")!;
-      await fetch(`${LINE_API_BASE}/message/push`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          to: groupId,
-          messages: [buildGroupShareMessage(items, shareUrl, expiresAt)]
-        }),
-      });
-
-      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "グループに台帳サマリーを共有しました！📤" }]);
-    } else {
-      // 個人チャットの場合は共有用メッセージを返信
-      if (event.replyToken) await replyMessage(event.replyToken, [
-        {
-          type: "text",
-          text: `📋 台帳共有リンクを作成しました\n\n${shareUrl}\n\n⏰ ${expiresAt.getMonth() + 1}/${expiresAt.getDate()}まで有効\n\nこのリンクをグループに貼ると、お子さんが詳細を確認できます。`
-        }
-      ]);
-    }
-    return;
-  }
-
-  // 台帳エクスポート (action=export_ledger)
-  if (action === "export_ledger") {
-    const supabase = getSupabaseClient();
-
-    // ユーザーの台帳を取得
-    const { data: items } = await supabase
-      .from("ledgers")
-      .select("*")
-      .eq("line_user_id", userId)
-      .eq("status", "active")
-      .order("created_at", { ascending: false });
-
-    if (!items || items.length === 0) {
-      if (event.replyToken) await replyMessage(event.replyToken, [{ type: "text", text: "エクスポートできる台帳がありません。" }]);
-      return;
-    }
-
-    // CSVデータ作成
-    const csvHeader = "サービス名,種類,月額,ID等,メモ,最終確認日";
-    const csvRows = items.map((item: any) => {
-      const confirmed = item.last_confirmed_at ? new Date(item.last_confirmed_at).toLocaleDateString("ja-JP") : "-";
-      return `"${item.service_name || ""}","${item.category || ""}","${item.monthly_cost || ""}","${item.account_identifier || ""}","${(item.note || "").replace(/"/g, '""')}","${confirmed}"`;
-    });
-    const csvContent = [csvHeader, ...csvRows].join("\n");
-
-    // 合計金額
-    const total = items.reduce((sum: number, item: any) => sum + (item.monthly_cost || 0), 0);
-
-    await logUsage(userId, "ledger_export", { count: items.length, format: "csv" });
-
-    // CSVはLINEでは送れないので、サマリーとコピー用テキストを返信
-    if (event.replyToken) await replyMessage(event.replyToken, [
-      {
-        type: "text",
-        text: `📥 台帳エクスポート\n\n登録件数: ${items.length}件\n月額合計: ¥${total.toLocaleString()}\n\n⚠️ パスワードは含まれていません\n\n以下をコピーしてメモ帳などに貼り付けてください👇`
-      },
-      {
-        type: "text",
-        text: csvContent
-      }
-    ]);
-    return;
-  }
 }
 
 
@@ -2280,10 +1964,10 @@ serve(async (req) => {
     }
 
     for (const event of webhookBody.events) {
-      // 重複排除
-      const eventId = `${event.source.userId}-${Date.now()}`;
+      // 重複排除（LINE webhookEventId or fallback）
+      const eventId = event.webhookEventId || `${event.source?.userId}-${event.timestamp}`;
       if (isDuplicate(eventId)) {
-        console.log("Duplicate event, skipping");
+        console.log("Duplicate event, skipping:", eventId);
         continue;
       }
 

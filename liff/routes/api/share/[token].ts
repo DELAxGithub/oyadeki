@@ -5,6 +5,70 @@ const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 export const handler: Handlers = {
+  // メモ更新
+  async PATCH(req, ctx) {
+    const { token } = ctx.params;
+
+    if (!supabaseUrl || !supabaseServiceKey) {
+      return new Response(
+        JSON.stringify({ error: "Server configuration error" }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // 共有トークン検証
+    const { data: share, error: shareError } = await supabase
+      .from("ledger_shares")
+      .select("line_user_id, expires_at")
+      .eq("token", token)
+      .single();
+
+    if (shareError || !share) {
+      return new Response(
+        JSON.stringify({ error: "共有リンクが見つかりません" }),
+        { status: 404, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    if (new Date(share.expires_at) < new Date()) {
+      return new Response(
+        JSON.stringify({ error: "リンクの有効期限切れです" }),
+        { status: 410, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const body = await req.json();
+    const { id, note } = body;
+
+    if (!id) {
+      return new Response(
+        JSON.stringify({ error: "idが必要です" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // 本人の台帳のみ更新可能
+    const { error: updateError } = await supabase
+      .from("ledgers")
+      .update({ note: note ?? null })
+      .eq("id", id)
+      .eq("line_user_id", share.line_user_id);
+
+    if (updateError) {
+      return new Response(
+        JSON.stringify({ error: "更新に失敗しました" }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    return new Response(
+      JSON.stringify({ success: true }),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  },
+
   async GET(_req, ctx) {
     const { token } = ctx.params;
 

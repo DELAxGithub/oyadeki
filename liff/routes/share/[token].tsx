@@ -36,6 +36,10 @@ export default function SharePage({ data }: PageProps<PageData>) {
               from { transform: rotate(0deg); }
               to { transform: rotate(360deg); }
             }
+            @keyframes slideUp {
+              from { transform: translateY(100%); }
+              to { transform: translateY(0); }
+            }
           `}
         </style>
       </Head>

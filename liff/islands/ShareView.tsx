@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 
 interface LedgerItem {
   id: string;
@@ -35,6 +35,10 @@ export default function ShareView({ token }: ShareViewProps) {
   const [data, setData] = useState<ShareData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedItem, setSelectedItem] = useState<LedgerItem | null>(null);
+  const [editingNote, setEditingNote] = useState("");
+  const [savingNote, setSavingNote] = useState(false);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     // Mock data for testing or fallback
@@ -130,6 +134,38 @@ export default function ShareView({ token }: ShareViewProps) {
 
   if (!data) return null;
 
+  const openDetail = (item: LedgerItem) => {
+    setSelectedItem(item);
+    setEditingNote(item.note || "");
+  };
+
+  const handleSaveNote = async () => {
+    if (!selectedItem || !data) return;
+    const newNote = editingNote.trim() || null;
+    if (newNote === (selectedItem.note || null)) return;
+
+    setSavingNote(true);
+    try {
+      const res = await fetch(`/api/share/${token}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: selectedItem.id, note: newNote }),
+      });
+
+      if (res.ok) {
+        const updatedLedgers = data.ledgers.map((l) =>
+          l.id === selectedItem.id ? { ...l, note: newNote } : l
+        );
+        setData({ ...data, ledgers: updatedLedgers });
+        setSelectedItem({ ...selectedItem, note: newNote });
+      }
+    } catch (_e) {
+      alert("保存に失敗しました");
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
   const expiryDate = new Date(data.expiresAt);
   const daysLeft = Math.ceil(
     (expiryDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24),
@@ -193,7 +229,8 @@ export default function ShareView({ token }: ShareViewProps) {
           {data.ledgers.map((item) => (
             <div
               key={item.id}
-              class="bg-white rounded-xl border border-border p-5 shadow-sm hover:border-primary transition-colors"
+              class="bg-white rounded-xl border border-border p-5 shadow-sm hover:border-primary transition-colors cursor-pointer active:scale-[0.98]"
+              onClick={() => openDetail(item)}
             >
               <div class="flex justify-between items-start mb-1">
                 <div class="flex flex-col gap-1">
@@ -260,6 +297,96 @@ export default function ShareView({ token }: ShareViewProps) {
           <p class="text-xs text-foreground-muted">Powered by Oyadeki</p>
         </div>
       </div>
+
+      {/* 詳細モーダル */}
+      {selectedItem && (
+        <div
+          class="fixed inset-0 bg-black/40 z-50 flex items-end justify-center"
+          onClick={() => setSelectedItem(null)}
+        >
+          <div
+            class="bg-white rounded-t-2xl w-full max-w-2xl min-h-[70vh] max-h-[92vh] overflow-y-auto"
+            style={{ animation: "slideUp 0.2s ease-out" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* ヘッダー */}
+            <div class="sticky top-0 bg-white border-b border-gray-100 px-5 py-3 flex items-center justify-between rounded-t-2xl">
+              <button
+                onClick={() => setSelectedItem(null)}
+                class="text-sm text-foreground-secondary px-2 py-1"
+              >
+                閉じる
+              </button>
+              <div class="w-10 h-1 bg-gray-300 rounded-full absolute left-1/2 -translate-x-1/2 top-2" />
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-gray-100 text-gray-600">
+                {categoryLabels[selectedItem.category] || selectedItem.category}
+              </span>
+            </div>
+
+            <div class="px-5 py-4 space-y-4">
+              {/* タイトル + 金額 */}
+              <div>
+                <h2 class="text-lg font-bold text-foreground">{selectedItem.service_name}</h2>
+                {selectedItem.monthly_cost != null && (
+                  <p class="text-2xl font-bold text-primary mt-1">
+                    ¥{selectedItem.monthly_cost.toLocaleString()}<span class="text-sm font-normal text-foreground-secondary">/月</span>
+                  </p>
+                )}
+              </div>
+
+              {/* 詳細 */}
+              <div class="space-y-2">
+                {selectedItem.account_identifier && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-foreground-muted w-16">ID等</span>
+                    <span class="font-medium text-foreground break-all">{selectedItem.account_identifier}</span>
+                  </div>
+                )}
+                {selectedItem.storage_location && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-foreground-muted w-16">保管場所</span>
+                    <span class="font-medium text-foreground">📂 {selectedItem.storage_location}</span>
+                  </div>
+                )}
+                {selectedItem.last_confirmed_at && (
+                  <div class="flex items-center gap-2 text-sm">
+                    <span class="text-foreground-muted w-16">最終確認</span>
+                    <span class="text-foreground">{new Date(selectedItem.last_confirmed_at).toLocaleDateString("ja-JP")}</span>
+                  </div>
+                )}
+                <div class="flex items-center gap-2 text-sm">
+                  <span class="text-foreground-muted w-16">登録日</span>
+                  <span class="text-foreground">{new Date(selectedItem.created_at).toLocaleDateString("ja-JP")}</span>
+                </div>
+              </div>
+
+              {/* メモ編集 */}
+              <div>
+                <label class="block text-sm font-medium text-foreground-secondary mb-1">
+                  メモ
+                </label>
+                <textarea
+                  ref={noteRef}
+                  value={editingNote}
+                  onInput={(e) => setEditingNote((e.target as HTMLTextAreaElement).value)}
+                  placeholder="解約方法、注意点など..."
+                  class="w-full px-3 py-2 text-sm border border-border rounded-xl bg-gray-50 focus:bg-white focus:border-primary focus:outline-none resize-y"
+                  rows={4}
+                />
+                {editingNote.trim() !== (selectedItem.note || "") && (
+                  <button
+                    onClick={handleSaveNote}
+                    disabled={savingNote}
+                    class="mt-2 w-full py-2.5 text-sm font-medium rounded-xl bg-primary text-white disabled:opacity-50"
+                  >
+                    {savingNote ? "保存中..." : "メモを保存"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

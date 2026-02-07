@@ -115,12 +115,12 @@ async function getImageContent(messageId: string): Promise<{ base64: string; mim
     // Prefer preview image for safety (smaller size)
     const preview = await fetchLineImageBytes(messageId, "preview");
     console.log("Using preview image size:", preview.bytes.length);
-    return { base64: encodeBase64(preview.bytes), mimeType: preview.mimeType };
+    return { base64: encodeBase64(preview.bytes.buffer), mimeType: preview.mimeType };
   } catch (error) {
     console.error("Failed to fetch preview, trying original content:", error);
     // Fallback to original content (risky but better than nothing)
     const original = await fetchLineImageBytes(messageId, "content");
-    return { base64: encodeBase64(original.bytes), mimeType: original.mimeType };
+    return { base64: encodeBase64(original.bytes.buffer), mimeType: original.mimeType };
   }
 }
 
@@ -233,6 +233,169 @@ function parseVisionResponse(text: string): {
 }
 
 /**
+ * メインメニューFlex Message生成
+ */
+function buildMainMenuFlexMessage() {
+  return {
+    type: "flex",
+    altText: "基本メニュー",
+    contents: {
+      type: "bubble",
+      hero: {
+        type: "image",
+        url: "https://oyadeki-liff.deno.dev/logo.svg", // ロゴがあれば
+        size: "full",
+        aspectRatio: "20:13",
+        aspectMode: "cover",
+      },
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        contents: [
+          {
+            type: "text",
+            text: "オヤデキ メニュー",
+            weight: "bold",
+            size: "xl",
+            align: "center",
+          },
+          {
+            type: "text",
+            text: "何をしますか？",
+            size: "sm",
+            color: "#666666",
+            align: "center",
+          },
+          {
+            type: "separator",
+            margin: "lg",
+          },
+          {
+            type: "box",
+            layout: "horizontal",
+            spacing: "md",
+            margin: "lg",
+            contents: [
+              {
+                type: "button",
+                style: "secondary",
+                color: "#F0F0F0",
+                height: "sm",
+                action: { type: "message", label: "📑 契約台帳", text: "台帳" },
+                flex: 1,
+              },
+              {
+                type: "button",
+                style: "secondary",
+                color: "#F0F0F0",
+                height: "sm",
+                action: { type: "message", label: "📺 見たもの", text: "見た" },
+                flex: 1,
+              },
+            ],
+          },
+          {
+            type: "box",
+            layout: "horizontal",
+            spacing: "md",
+            margin: "md",
+            contents: [
+              {
+                type: "button",
+                style: "secondary",
+                color: "#F0F0F0",
+                height: "sm",
+                action: { type: "message", label: "📦 出品", text: "出品" },
+                flex: 1,
+              },
+              {
+                type: "button",
+                style: "secondary",
+                color: "#F0F0F0",
+                height: "sm",
+                action: { type: "uri", label: "⚙️ 設定", uri: "https://oyadeki-liff.deno.dev/settings" },
+                flex: 1,
+              },
+            ],
+          },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        contents: [
+          {
+            type: "button",
+            action: { type: "postback", label: "使い方のヒント", data: "action=show_help_tips" },
+            style: "link",
+            height: "sm",
+          }
+        ]
+      }
+    },
+  };
+}
+
+/**
+ * 出品サポートFlex Message
+ */
+function buildSellSupportFlexMessage() {
+  return {
+    type: "flex",
+    altText: "メルカリ出品サポート",
+    contents: {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        contents: [
+          { type: "text", text: "📦 出品サポート", weight: "bold", size: "lg", color: "#E53935" },
+          { type: "text", text: "売りたい物の写真を送ってください。\nAIがタイトルと説明文を作ります！", wrap: true, size: "sm" },
+          {
+            type: "box",
+            layout: "vertical",
+            spacing: "sm",
+            margin: "md",
+            contents: [
+              { type: "text", text: "💡 撮影のヒント", size: "xs", color: "#888888", weight: "bold" },
+              { type: "text", text: "・全体が明るく写るように", size: "xs", color: "#888888" },
+              { type: "text", text: "・傷や汚れがあればアップで", size: "xs", color: "#888888" }
+            ]
+          }
+        ]
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            action: { type: "camera", label: "📷 カメラで撮る" }
+          },
+          {
+            type: "button",
+            style: "secondary",
+            action: { type: "cameraRoll", label: "🖼️ ライブラリから選ぶ" }
+          },
+          { type: "separator", margin: "md" },
+          {
+            type: "button",
+            style: "link",
+            height: "sm",
+            action: { type: "message", label: "≡ メニューに戻る", text: "メニュー" },
+            margin: "sm"
+          }
+        ]
+      }
+    }
+  };
+}
+
+/**
  * Vision結果用Flex Message
  */
 function buildVisionFlexMessage(
@@ -320,22 +483,47 @@ function buildVisionFlexMessage(
                 style: "primary",
                 height: "sm",
                 action: { type: "postback", label: "わかった！", data: `vision=${helpId}&result=understood` },
+                flex: 2,
               },
               {
                 type: "button",
                 style: "secondary",
                 height: "sm",
                 action: { type: "postback", label: "電話で聞く", data: `vision=${helpId}&result=call` },
+                flex: 1,
               },
             ],
           },
+          { type: "separator", margin: "md" },
           {
-            type: "button",
-            style: "link",
-            height: "sm",
-            action: { type: "postback", label: "📑 これを台帳に登録", data: `action=propose_ledger&msgId=${messageId}` },
-            margin: "sm"
-          }
+            type: "text",
+            text: "もし別の要件なら...",
+            size: "xs",
+            color: "#aaaaaa",
+            align: "center",
+            margin: "md",
+          },
+          {
+            type: "box",
+            layout: "horizontal",
+            spacing: "sm",
+            contents: [
+              {
+                type: "button",
+                style: "secondary",
+                height: "sm",
+                action: { type: "postback", label: "📑 台帳へ", data: `action=propose_ledger&msgId=${messageId}` },
+                flex: 1,
+              },
+              {
+                type: "button",
+                style: "secondary",
+                height: "sm",
+                action: { type: "message", label: "📺 記録へ", text: "見た" }, // 簡易的にテキスト発火で誘導
+                flex: 1,
+              },
+            ],
+          },
         ],
       },
     },
@@ -530,6 +718,13 @@ function buildMediaConfirmFlexMessage(media: MediaInfo) {
               },
             ],
           },
+          { type: "separator", margin: "sm" },
+          {
+            type: "button", // 修正：他のメニューに戻る動線を追加
+            style: "link",
+            height: "sm",
+            action: { type: "message", label: "≡ メニューに戻る", text: "メニュー" },
+          }
         ],
       },
     },
@@ -730,7 +925,8 @@ async function handleMessageEvent(event: LineEvent) {
   // 画像は常に反応、テキストは「呼びかけ」のみ反応
   if ((sourceType === "group" || sourceType === "room") && message.type === "text") {
     const text = message.text?.toLowerCase() || "";
-    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定", "タスク", "やること"];
+    // キーワードを拡張：メニュー系も反応するように
+    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定", "menu", "メニュー"];
     const isCalled = keywords.some(k => text.includes(k));
 
     if (!isCalled) {
@@ -746,15 +942,18 @@ async function handleMessageEvent(event: LineEvent) {
       // 特殊コマンド処理
       const lowerText = message.text.toLowerCase().trim();
 
+      // メインメニュー表示
+      // グループで「オヤデキ」と呼ばれたときもここに来る
+      if (["メニュー", "menu", "オヤデキ", "おやでき"].includes(lowerText)) {
+        await logUsage(userId, "main_menu_trigger", {});
+        await replyMessage(replyToken, [buildMainMenuFlexMessage()]);
+        return;
+      }
+
       // メルカリ出品モード
       if (lowerText === "売る" || lowerText === "出品" || lowerText === "メルカリ") {
         await logUsage(userId, "sell_mode_start", {});
-        await replyMessage(replyToken, [
-          {
-            type: "text",
-            text: "📦 出品サポートモード！\n\n売りたいものの写真を送ってね。\nタイトルと説明文を作るよ！\n\n💡 ヒント：\n・全体が見える写真がベスト\n・傷や汚れがあれば、そこも撮ってね",
-          },
-        ]);
+        await replyMessage(replyToken, [buildSellSupportFlexMessage()]);
         return;
       }
 
@@ -1299,12 +1498,21 @@ async function handleMessageEvent(event: LineEvent) {
           type: "text",
           text: "📷 写真を送ってみてください！\n\n" +
             "・スマホ画面で困ったことがあれば → 操作を案内\n" +
-            "・テレビや映画の画面なら → 視聴記録に保存\n\n" +
-            "コマンド一覧：\n" +
-            "「台帳」→ 契約情報\n" +
-            "「見た」→ 視聴記録\n" +
-            "「設定」→ 環境設定\n" +
-            "「使い方」→ ヘルプ",
+            "・テレビや映画の画面なら → 視聴記録に保存\n" +
+            "・売りたいものなら → 出品文作成\n\n" +
+            "下のボタンからメニューも開けます👇",
+          quickReply: {
+            items: [
+              {
+                type: "action",
+                action: { type: "message", label: "≡ メニューを開く", text: "メニュー" }
+              },
+              {
+                type: "action",
+                action: { type: "camera", label: "📷 写真を撮る" }
+              }
+            ]
+          }
         },
       ]);
       await logUsage(userId, "message", { text_length: message.text.length });

@@ -8,15 +8,51 @@ const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 interface GeminiResponse {
     candidates?: Array<{
         content: {
-            parts: Array<{ text: string }>;
+            parts: Array<{ text?: string; thought?: string }>;
         };
     }>;
 }
+
+import { UserContext } from "./supabase-client.ts";
 
 export interface GenerateOptions {
     model?: string;
     signal?: AbortSignal;
     maxTokens?: number;
+    tools?: any[];
+}
+
+/**
+ * ユーザーのコンテキストに基づいてペルソナ（口調・キャラ設定）を生成する
+ */
+export function getPersonaInstruction(context: UserContext | null): string {
+    const defaultMetaphor = `
+【キャラクター設定：ツェーゲン金沢サポーター】
+語尾や雰囲気に少しだけ活気を持たせる。
+- 感嘆：「ナイスゴール！」「レッドカード！（危険）」「VAR判定（確認中）」
+- 肯定：「その調子！」「いい攻め上がりです！」
+- 挨拶：「お疲れ様です！後半戦もいきましょう！」
+`;
+
+    if (context?.metaphor_enabled && context?.metaphor_theme) {
+        const theme = context.metaphor_theme;
+        if (theme.includes("相撲")) {
+            return `
+【キャラクター設定：大相撲の行司・親方】
+- 語尾：「〜でごわす」「〜とのこと」
+- 表現：「待ったなし」「土俵際」「金星」
+- 丁寧だが力強い口調で。
+`;
+        } else if (theme.includes("サッカー") || theme.includes("ツェーゲン")) {
+            return defaultMetaphor;
+        } else {
+            return `
+【キャラクター設定：${theme}】
+「${theme}」に関連した親しみやすい例えや口調を適度に使ってください。
+`;
+        }
+    }
+    return defaultMetaphor;
 }
 
 /**
@@ -39,6 +75,7 @@ export async function generateText(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
+            tools: options.tools,
             generationConfig: {
                 maxOutputTokens: options.maxTokens ?? 2048,
                 temperature: 0.7,
@@ -72,23 +109,29 @@ export async function analyzeImage(
 
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
+    const body: any = {
+        contents: [
+            {
+                parts: [
+                    { text: prompt },
+                    { inline_data: { mime_type: mimeType, data: imageBase64 } },
+                ],
+            },
+        ],
+        generationConfig: {
+            maxOutputTokens: options.maxTokens ?? 2048,
+            temperature: 0.5,
+        },
+    };
+
+    if (options.tools) {
+        body.tools = options.tools;
+    }
+
     const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            contents: [
-                {
-                    parts: [
-                        { text: prompt },
-                        { inline_data: { mime_type: mimeType, data: imageBase64 } },
-                    ],
-                },
-            ],
-            generationConfig: {
-                maxOutputTokens: options.maxTokens ?? 2048,
-                temperature: 0.5,
-            },
-        }),
+        body: JSON.stringify(body),
         signal: options.signal,
     });
 
@@ -291,38 +334,40 @@ export type IdentifyMediaResult = MediaInfo | MediaDialogueState | null;
  */
 export async function identifyMedia(
     imageBase64: string,
-    mimeType: string
+    mimeType: string,
+    userContext: UserContext | null
 ): Promise<MediaDialogueState | null> {
-    const prompt = `あなたはアニメ・映画・テレビ番組・音楽・スポーツに精通したメディア鑑定士です。
-この画像に映っているメディアについて、アキネイターのようにユーザーとの対話を通じて特定していきます。
+    const persona = getPersonaInstruction(userContext);
 
-【重要ルール】
-- たとえ作品がわかっても、すぐに答えを出さないでください。
-- まず画像から読み取れる視覚情報を整理し、ユーザーに確認する質問をしてください。
-- 質問にはトリビア（豆知識）を1つ交えて、会話を楽しくしてください。
-- あなたの推測（候補作品）は media_candidate に入れてください（内部データで、ユーザーには直接見せません）。
-- 質問は具体的に。「このキャラはガンダムシリーズに登場しますか？」のように作品名を挙げてください。
-- アニメキャラの場合、服装・髪型・体格・雰囲気から推測してください。
+    // Google Search Groundingを利用して正解精度を高める
+    const prompt = `あなたは映画・ドラマ・アニメ・音楽の「メディア鑑定士」です。
+ユーザーが送ってきた画像を分析し、検索ツールも駆使して作品を特定してください。
+そして、ユーザーに対して「アキネーター」のようなゲーム形式で、対話を通じて正解を確認・特定していきます。
+${persona}
+
+【ミッション】
+1. 画像の視覚的特徴（俳優、キャラ、構図、文字）を分析する。
+2. Google検索を使って、それが何であるか**内部的に**正解を推測する (media_candidate)。
+3. ユーザーには**正解をすぐには言わず**、視覚的特徴に基づいた「ヒント質問」を投げかける。
+4. 質問には必ず「トリビア（豆知識）」を1つ混ぜて、会話を楽しませる。
 
 【出力形式 - JSONのみ】
 {
-  "visual_clues": "画像から読み取れる視覚情報（キャラの外見、背景、文字、色使いなど）",
-  "question": "ユーザーへの最初の質問。トリビアを交えて楽しく。例：『軍服を着た男性が映っていますね。ちなみにロボットアニメの中でも「機動戦士ガンダム」は1979年の放送開始以来、40作品以上が制作されているんですよ！この画面はガンダムシリーズでしょうか？』",
+  "visual_clues": "画像から読み取れた視覚情報（俳優名A, アニメキャラBなど）",
+  "question": "ユーザーへの質問。\n例：『これはアクション映画の雰囲気ですね！主演はトム・クルーズに見えます。彼はノースタントで有名ですが、この作品もそうですか？』",
   "media_candidate": {
-    "media_type": "anime"|"movie"|"tv_show"|"sports"|"music"|"book"|"other",
-    "title": "推測する作品タイトル",
-    "subtitle": "キャラ名やエピソード名（あれば）",
-    "artist_or_cast": "出演者・声優（わかれば）",
+    "media_type": "movie"|"tv_show"|"anime"|"...",
+    "title": "推測した正解タイトル",
+    "subtitle": "推測したサブタイトル",
+    "artist_or_cast": "推測した出演者",
     "year": 2024,
-    "trivia": "この作品に関する豆知識（1〜2文）"
+    "trivia": "この作品に関する面白い豆知識"
   }
 }
-
-※ media_candidate は推測できない場合は null にしてください
-※ JSONのみを返し、Markdownコードブロックは不要です。`;
+※ JSONのみを返してください。`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
-    const model = "gemini-2.5-flash";
+    const model = "gemini-2.5-flash"; // 推奨モデル
     const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -337,10 +382,10 @@ export async function identifyMedia(
                     ],
                 },
             ],
+            tools: [{ google_search: {} }], // Grounding有効化
             generationConfig: {
                 response_mime_type: "application/json",
-                temperature: 0.3,
-                // 思考トークンを無効化してレスポンス速度を改善
+                temperature: 0.4,
                 thinkingConfig: { thinkingBudget: 0 },
             },
         }),
@@ -387,14 +432,17 @@ export async function continueMediaDialogue(
     visualClues: string,
     dialogueHistory: { role: string; text: string }[],
     userReply: string,
-    mediaCandidate?: MediaInfo | null
+    mediaCandidate: MediaInfo | null | undefined,
+    userContext: UserContext | null
 ): Promise<IdentifyMediaResult> {
+    const persona = getPersonaInstruction(userContext);
     const candidateInfo = mediaCandidate
         ? `\nAIの現在の推測: ${JSON.stringify(mediaCandidate)}`
         : "\nAIの推測: なし（まだ候補が絞れていない）";
 
-    const prompt = `あなたはアニメ・映画・テレビに精通したメディア鑑定士です。
-アキネイターのようにユーザーとの対話を通じて、作品を特定していきます。
+    const prompt = `あなたは映画・テレビ・アニメに詳しい「メディア鑑定士」です。
+ユーザーとの対話を通じて、作品を特定します。
+${persona}
 
 【現状の情報】
 視覚情報: ${visualClues}${candidateInfo}
@@ -403,26 +451,18 @@ export async function continueMediaDialogue(
 
 【重要ルール】
 1. ユーザーが作品名やシリーズ名を肯定した場合（「はい」「そう」「そうです」「正解」「合ってる」など）：
-   → パターンAで確定してください。AIの推測がある場合はそれを使い、なければユーザーの情報から特定してください。
+   → パターンAで確定してください。
 2. ユーザーがキャラ名や作品名のヒントを出した場合：
    → あなたの知識で補完し、「○○ですね！」と確認する質問を返してください（パターンB）。
 3. ユーザーが否定した場合（「違う」「いいえ」など）：
    → 別の候補を挙げて質問してください（パターンB）。新しい推測をmedia_candidateに入れてください。
 4. 質問にはトリビア（豆知識）を交えて会話を楽しくしてください。
-5. 2〜3回の対話で結論を目指してください。
 
 【出力形式 - JSONのみ】
 パターンA：ユーザーが確認・肯定した場合（確定）
 {
   "identified": true,
-  "data": {
-    "media_type": "anime"|"tv_show"|"movie"|"sports"|"music"|"book"|"other",
-    "title": "作品名",
-    "subtitle": "キャラ名やエピソード名",
-    "artist_or_cast": "声優・出演者",
-    "year": 1979,
-    "trivia": "豆知識1〜2文"
-  }
+  "data": { ...MediaInfo... }
 }
 
 パターンB：まだ確定していない場合（対話継続）
@@ -430,12 +470,8 @@ export async function continueMediaDialogue(
   "identified": false,
   "visual_clues": "更新された視覚情報",
   "question": "トリビアを交えた次の質問",
-  "media_candidate": {
-    "media_type": "...", "title": "...", "subtitle": "...",
-    "artist_or_cast": "...", "year": 0, "trivia": "..."
-  }
+  "media_candidate": { ...MediaInfo... }
 }
-※ media_candidate は新しい推測がなければ null
 
 JSONのみを返してください。`;
 
@@ -710,29 +746,34 @@ export interface SellDialogueState {
  */
 export async function analyzeProductImage(
     imageBase64: string,
-    mimeType: string
+    mimeType: string,
+    userContext: UserContext | null
 ): Promise<SellDialogueState | null> {
-    const prompt = `あなたはフリマアプリの出品アシスタントです。
+    const persona = getPersonaInstruction(userContext);
+
+    // Google検索を使って相場情報も取得する
+    const prompt = `あなたはプロの「メルカリ出品アシスタント」です。
 ユーザーが売りたい商品の写真を送ってきました。
-この画像を分析し、出品に必要な情報を抽出してください。
+画像を分析し、検索ツールも使って、商品名や相場を特定してください。
+そして、出品に必要な情報を整理し、ユーザーに最初の質問（または確認）を行ってください。
+${persona}
+
+【タスク】
+1. 画像から商品（ブランド、型番、状態）を特定する。
+2. Google検索で「メルカリ 売り切れ」などの情報を探し、相場（price_estimate）を調べる。
+3. ユーザーに声をかける最初のメッセージ(first_question)を作成する。
 
 【出力形式 - JSONのみ】
 {
-  "image_summary": "画像の視覚的な説明（色、形、文字情報、メーカーロゴなど）",
+  "image_summary": "画像の視覚的特徴",
   "extracted_info": {
     "category": "推定カテゴリ",
-    "product_name": "推定商品名（型番含む）",
-    "features": "特徴リスト"
+    "product_name": "推定商品名・型番",
+    "price_estimate": "推定相場（例: 3000円〜5000円）"
   },
-  "first_question": "ユーザーに尋ねるべき最初の質問（1つだけ、フレンドリーに）"
-                  "例：『これはダイソンの掃除機ですね！型番はわかりますか？』"
-                  "例：『きれいなバッグですね。ブランドはわかりますか？』"
+  "first_question": "ユーザーへの最初の質問（1つだけ）。\n例：『これはダイソンのV10ですね！相場は1万円前後のようです。型番はSV12で合っていますか？』"
 }
-
-【質問のコツ】
-- まず「これは〇〇ですね！」と特定できたことを伝えて安心させる
-- 次に、写真からはわからない最も重要な情報（型番、サイズ、ブランド、購入時期など）を聞く
-- 質問は1つに絞る`;
+`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
     const model = "gemini-2.5-flash";
@@ -748,6 +789,7 @@ export async function analyzeProductImage(
                     { inline_data: { mime_type: mimeType, data: imageBase64 } },
                 ],
             }],
+            tools: [{ google_search: {} }], // Grounding有効化
             generationConfig: { response_mime_type: "application/json", temperature: 0.5 },
         }),
     });
@@ -782,44 +824,35 @@ export async function continueSellingDialogue(
     currentInfo: Record<string, any>,
     imageSummary: string,
     dialogueHistory: { role: string; text: string }[],
-    userReply: string
+    userReply: string,
+    userContext: UserContext | null
 ): Promise<SellDialogueState | null> {
-    const prompt = `あなたはフリマアプリの出品アシスタントです。
-これまでの情報と、ユーザーの最新の回答をもとに、出品情報を更新してください。
+    const persona = getPersonaInstruction(userContext);
+    const prompt = `あなたはプロの「メルカリ出品アシスタント」です。
+ユーザーとの対話を通じて、出品文を完成させます。
+${persona}
 
 【現状の情報】
 画像の特徴: ${imageSummary}
 抽出済み情報: ${JSON.stringify(currentInfo)}
 会話履歴: ${JSON.stringify(dialogueHistory.slice(-4))}
-
-【ユーザーの回答】
-"${userReply}"
+ユーザーの回答: "${userReply}"
 
 【タスク】
-1. ユーザーの回答から新しい情報（サイズ、状態、購入時期、型番など）を抽出し、extracted_infoを更新してください。
-2. 出品文を作成するのに十分な情報が集まったか判定してください (is_sufficient)。
-   - 必須: 商品名、カテゴリ、状態の大まかな把握
-   - 十分なら true、まだ重要情報が欠けていれば false
-3. falseの場合: 次に聞くべき質問 (next_question) を生成してください。
-4. trueの場合: 出品文情報 (listing) を生成してください。
+1. ユーザーの回答から情報を抽出し、extracted_infoを更新する。
+2. 出品文作成に十分か判定する (is_sufficient)。
+   - 必須: 商品名、状態、カテゴリ
+3. 不十分なら: 次の質問 (next_question) を生成。
+4. 十分なら: 出品文 (listing) を生成。
 
 【出力形式 - JSONのみ】
 {
-  "extracted_info": { ...更新後の情報... },
-  "is_sufficient": true | false,
-  "next_question": "次の質問（is_sufficientがfalseの場合）",
-  "listing": {
-    "title": "出品タイトル (is_sufficientがtrueの場合)",
-    "description": "商品説明文",
-    "category": "カテゴリ",
-    "condition": "状態"
-  }
+  "extracted_info": { ... },
+  "is_sufficient": boolean,
+  "next_question": "...",
+  "listing": { "title": "...", "description": "...", "category": "...", "condition": "..." }
 }
-
-【質問のコツ】
-- 前の回答を肯定する（例：「なるほど、3年使用ですね」）
-- 質問は1つずつ、具体的に
-- 「もう十分かな」と思ったら無理に聞かず出品文を作る`;
+`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
     const model = "gemini-2.5-flash";

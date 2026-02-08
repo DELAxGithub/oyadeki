@@ -1186,6 +1186,9 @@ async function handleMessageEvent(event: LineEvent) {
       const activeSellItem = await getActiveSellItem(userId);
       console.log("activeSellItem check:", activeSellItem ? `found (id=${activeSellItem.id}, status=${activeSellItem.status})` : "none");
 
+      // ユーザー設定取得（対話用）
+      const userContext = await getUserContext(userId);
+
       if (activeSellItem) {
         // キャンセル処理
         if (lowerText === "キャンセル" || lowerText === "やめる" || lowerText === "終了") {
@@ -1244,7 +1247,8 @@ async function handleMessageEvent(event: LineEvent) {
               info.visual_clues || "",
               history,
               message.text,
-              null // 候補リセット
+              null, // 候補リセット
+              userContext
             );
 
             if (result && "visual_clues" in result) {
@@ -1291,7 +1295,8 @@ async function handleMessageEvent(event: LineEvent) {
               info.visual_clues || "",
               history,
               message.text,
-              storedCandidate
+              storedCandidate,
+              userContext
             );
 
             console.log("  continueMediaDialogue result:", result ? JSON.stringify(result).substring(0, 200) : "null");
@@ -1400,7 +1405,8 @@ async function handleMessageEvent(event: LineEvent) {
             activeSellItem.extracted_info,
             activeSellItem.image_summary || "",
             history,
-            message.text
+            message.text,
+            userContext
           );
 
           if (nextState) {
@@ -1559,7 +1565,7 @@ async function handleMessageEvent(event: LineEvent) {
 
           // LINEの仕様上、replyTokenは1回のみ有効。
           // 先にメッセージを送ると結果を送れなくなるため、何も送らず解析を待つ。
-          const analysis = await analyzeProductImage(base64, mimeType);
+          const analysis = await analyzeProductImage(base64, mimeType, userContext);
 
           if (analysis) {
             // DBに保存
@@ -1619,7 +1625,7 @@ async function handleMessageEvent(event: LineEvent) {
         if (intent === "media") {
           // ==================== メディアログフロー（二段階：対話→確定→評価） ====================
           console.log("Processing as media content (two-stage dialogue)...");
-          const dialogueState = await identifyMedia(base64, mimeType);
+          const dialogueState = await identifyMedia(base64, mimeType, userContext);
 
           if (dialogueState) {
             console.log("Media dialogue started:", dialogueState.visual_clues);

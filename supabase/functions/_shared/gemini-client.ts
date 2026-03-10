@@ -245,7 +245,7 @@ export async function extractLedgerInfo(
 export async function classifyImageIntent(
     imageBase64: string,
     mimeType: string
-): Promise<"help" | "media" | "sell"> {
+): Promise<"help" | "media" | "sell" | "ledger"> {
     const prompt = `この画像を見て、以下のどれか判定してください:
 
 1. "help" - スマホの操作に困っている画面
@@ -259,7 +259,11 @@ export async function classifyImageIntent(
    (家電、ガジェット、服、バッグ、本、ゲーム機、フィギュア、
     またはそれらが机の上や背景ありで撮影されている写真)
 
-回答: help または media または sell のみ（他の文字は含めない）`;
+4. "ledger" - 契約台帳に登録すべき書類・契約情報
+   (請求書、明細、会員証、契約書、公共料金のハガキ、
+    サブスク決済履歴、通信契約の画面など)
+
+回答: help または media または sell または ledger のみ（他の文字は含めない）`;
 
     const apiKey = Deno.env.get("GEMINI_API_KEY")!;
     const model = "gemini-2.5-flash";
@@ -280,21 +284,20 @@ export async function classifyImageIntent(
             generationConfig: {
                 maxOutputTokens: 50,
                 temperature: 0.1,
-                // gemini-2.5-flash は思考モデル。分類タスクでは思考不要。
-                // thinkingBudget=0 で思考トークン消費を防ぎ、出力枠を確保。
-                thinkingConfig: { thinkingBudget: 0 },
             },
         }),
     });
 
     if (!response.ok) {
-        console.error("classifyImageIntent failed:", response.status);
+        const errorText = await response.text();
+        console.error("classifyImageIntent failed:", response.status, errorText);
         return "help"; // デフォルトはhelp
     }
 
     const data: GeminiResponse = await response.json();
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() ?? "";
 
+    if (text.includes("ledger")) return "ledger";
     if (text.includes("media")) return "media";
     if (text.includes("sell")) return "sell";
     return "help";
@@ -327,6 +330,127 @@ export interface MediaDialogueState {
 
 export type IdentifyMediaResult = MediaInfo | MediaDialogueState | null;
 
+function summarizeParts(parts: Array<{ text?: string; thought?: string }> | undefined) {
+    if (!parts) return [];
+    return parts.map((part, index) => ({
+        index,
+        hasText: !!part.text,
+        hasThought: !!part.thought,
+        textPreview: part.text ? part.text.slice(0, 120) : "",
+    }));
+}
+
+function tryParseJsonText(raw: string): Record<string, unknown> | null {
+    // 1) strict JSON
+    try {
+        return JSON.parse(raw);
+    } catch {
+        // continue
+    }
+
+    // 2) fenced code block
+    const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence?.[1]) {
+        try {
+            return JSON.parse(fence[1].trim());
+        } catch {
+            // continue
+        }
+    }
+
+    // 3) first/last brace extraction
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+        try {
+            return JSON.parse(raw.slice(start, end + 1));
+        } catch {
+            // continue
+        }
+    }
+
+    return null;
+}
+
+function parseJsonFromParts(parts: Array<{ text?: string; thought?: string }> | undefined): {
+    parsed: Record<string, unknown> | null;
+    rawText: string;
+} {
+    if (!parts || parts.length === 0) return { parsed: null, rawText: "" };
+    const texts = parts.map((part) => part.text).filter((text): text is string => !!text);
+    if (texts.length === 0) return { parsed: null, rawText: "" };
+
+    for (const text of texts) {
+        const parsed = tryParseJsonText(text);
+        if (parsed) return { parsed, rawText: text };
+    }
+
+    const merged = texts.join("\n");
+    return { parsed: tryParseJsonText(merged), rawText: merged };
+}
+
+function normalizeTriviaSentence(text: string): string {
+    // Keep trivia as declarative to avoid confusing the user.
+    let out = text;
+    out = out.replace(/[？?]/g, "。");
+    out = out.replace(/いかがでしょうか[。]*/g, "です。");
+    out = out.replace(/ご存知ですか[。]*/g, "ご存知です。");
+    out = out.replace(/でしょうか[。]*/g, "です。");
+    out = out.replace(/ですか[。]*/g, "です。");
+    out = out.replace(/。{2,}/g, "。");
+    return out.trim();
+}
+
+function normalizeAkinatorQuestion(raw: string): string {
+    const normalized = raw.trim().replace(/\r\n/g, "\n");
+    if (!normalized) return "この作品は何でしょうか？";
+
+    // Prefer two-line style:
+    // 1st line: identification question
+    // 2nd line: trivia (declarative)
+    const lines = normalized
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    if (lines.length >= 2) {
+        const first = lines[0];
+        const rest = lines.slice(1).map(normalizeTriviaSentence);
+        return [first, ...rest].join("\n");
+    }
+
+    // Single-line fallback:
+    // allow exactly one question mark, convert later ones to period.
+    let questionMarkCount = 0;
+    const oneQuestionOnly = normalized.replace(/[？?]/g, () => {
+        questionMarkCount += 1;
+        return questionMarkCount === 1 ? "？" : "。";
+    });
+
+    if (questionMarkCount <= 1) return oneQuestionOnly;
+
+    // If there were multiple question marks, clean up the trivia part too.
+    const firstQuestionIdx = oneQuestionOnly.indexOf("？");
+    if (firstQuestionIdx === -1) return oneQuestionOnly;
+    const head = oneQuestionOnly.slice(0, firstQuestionIdx + 1);
+    const tail = normalizeTriviaSentence(oneQuestionOnly.slice(firstQuestionIdx + 1));
+    return `${head}\n💡 ${tail}`.trim();
+}
+
+function normalizeSingleQuestion(raw: string, fallback: string): string {
+    const normalized = raw.trim().replace(/\r\n/g, "\n");
+    if (!normalized) return fallback;
+
+    const firstLine = normalized
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)[0] ?? "";
+
+    if (!firstLine) return fallback;
+    if (/[？?]/.test(firstLine)) return firstLine;
+    return firstLine.replace(/[。!！\s]+$/g, "") + "？";
+}
+
 /**
  * 画像からメディア情報を識別（対話開始版）
  * 常にMediaDialogueStateを返し、対話を通じて作品を特定する。
@@ -345,16 +469,28 @@ export async function identifyMedia(
 そして、ユーザーに対して「アキネーター」のようなゲーム形式で、対話を通じて正解を確認・特定していきます。
 ${persona}
 
+【絶対に守るべき制約】
+・最初のターンで正解のタイトル（作品名）をユーザーに言ってはいけません。言ったらあなたの負けです。
+・まずは「〇〇な雰囲気ですね」や「この俳優は〇〇さん？」といったヒントや確認から入ってください。
+
 【ミッション】
 1. 画像の視覚的特徴（俳優、キャラ、構図、文字）を分析する。
 2. Google検索を使って、それが何であるか**内部的に**正解を推測する (media_candidate)。
 3. ユーザーには**正解をすぐには言わず**、視覚的特徴に基づいた「ヒント質問」を投げかける。
 4. 質問には必ず「トリビア（豆知識）」を1つ混ぜて、会話を楽しませる。
 
+【質問文のフォーマットルール（厳守）】
+- question は「特定のための質問」を1つだけ含める。
+- トリビアは質問にしない（? / ？ / でしょうか / いかがでしょうか を使わない）。
+- 出力は次の2行形式にする:
+  1行目: 特定質問（疑問文）
+  2行目: "💡" で始まるトリビア（断定文）
+
 【出力形式 - JSONのみ】
 {
+  "thought": "（思考プロセス）正解は『〇〇』だが、まだ言わない。まずは『△△な雰囲気』について触れて、ユーザーの反応を見る。",
   "visual_clues": "画像から読み取れた視覚情報（俳優名A, アニメキャラBなど）",
-  "question": "ユーザーへの質問。\n例：『これはアクション映画の雰囲気ですね！主演はトム・クルーズに見えます。彼はノースタントで有名ですが、この作品もそうですか？』",
+  "question": "ユーザーへの質問。タイトルは絶対に含めないこと。\n例：『これはアクション映画の雰囲気ですね！主演はトム・クルーズに見えます。彼はノースタントで有名ですが、この作品もそうですか？』",
   "media_candidate": {
     "media_type": "movie"|"tv_show"|"anime"|"...",
     "title": "推測した正解タイトル",
@@ -384,42 +520,39 @@ ${persona}
             ],
             tools: [{ google_search: {} }], // Grounding有効化
             generationConfig: {
-                response_mime_type: "application/json",
                 temperature: 0.4,
-                thinkingConfig: { thinkingBudget: 0 },
+                maxOutputTokens: 1024,
             },
         }),
     });
 
     if (!response.ok) {
-        console.error("identifyMedia failed:", response.status);
+        const errorText = await response.text();
+        console.error("identifyMedia failed:", response.status, errorText);
         return null;
     }
 
     const data = await response.json();
-    // thinkingBudget=0 の場合、思考パートが入る可能性があるのでフィルタリング
     const parts = data.candidates?.[0]?.content?.parts;
-    let jsonText = "null";
-    if (parts) {
-        for (const part of parts) {
-            if (part.text && !part.thought) {
-                jsonText = part.text;
-                break;
-            }
-        }
-    }
-
-    try {
-        const parsed = JSON.parse(jsonText);
-        return {
-            visual_clues: parsed.visual_clues || "情報不足",
-            question: parsed.question || "この画面に映っているのは何ですか？",
-            media_candidate: parsed.media_candidate || undefined,
-        } as MediaDialogueState;
-    } catch (e) {
-        console.error("Failed to parse media JSON:", e);
+    const parsedResult = parseJsonFromParts(parts);
+    if (!parsedResult.parsed) {
+        console.error("identifyMedia: no text part in response", summarizeParts(parts));
         return null;
     }
+    const parsed = parsedResult.parsed;
+    if (!parsed) {
+        console.error("Failed to parse media JSON:", {
+            jsonPreview: parsedResult.rawText.slice(0, 240),
+            parts: summarizeParts(parts),
+        });
+        return null;
+    }
+
+    return {
+        visual_clues: String(parsed.visual_clues ?? "情報不足"),
+        question: normalizeAkinatorQuestion(String(parsed.question ?? "この画面に映っているのは何ですか？")),
+        media_candidate: (parsed.media_candidate as MediaInfo) || undefined,
+    } as MediaDialogueState;
 }
 
 /**
@@ -458,6 +591,13 @@ ${persona}
    → 別の候補を挙げて質問してください（パターンB）。新しい推測をmedia_candidateに入れてください。
 4. 質問にはトリビア（豆知識）を交えて会話を楽しくしてください。
 
+【質問文のフォーマットルール（厳守）】
+- question は特定のための質問を1つだけ。
+- トリビアは必ず断定文にし、疑問文にしない。
+- 出力は2行形式:
+  1行目: 特定質問（疑問文）
+  2行目: "💡" で始まるトリビア（断定文）
+
 【出力形式 - JSONのみ】
 パターンA：ユーザーが確認・肯定した場合（確定）
 {
@@ -487,38 +627,41 @@ JSONのみを返してください。`;
             generationConfig: {
                 response_mime_type: "application/json",
                 temperature: 0.4,
-                thinkingConfig: { thinkingBudget: 0 },
             },
         }),
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error("continueMediaDialogue failed:", response.status, errorText);
+        return null;
+    }
 
     const data = await response.json();
     const parts = data.candidates?.[0]?.content?.parts;
-    let jsonText = "null";
-    if (parts) {
-        for (const part of parts) {
-            if (part.text && !part.thought) {
-                jsonText = part.text;
-                break;
-            }
-        }
+    const parsedResult = parseJsonFromParts(parts);
+    if (!parsedResult.parsed) {
+        console.error("continueMediaDialogue: no text part in response", summarizeParts(parts));
+        return null;
     }
 
     try {
-        const parsed = JSON.parse(jsonText);
+        const parsed = parsedResult.parsed as any;
         if (parsed.identified && parsed.data && parsed.data.title) {
             return parsed.data as MediaInfo;
         } else if (!parsed.identified && parsed.question) {
             return {
                 visual_clues: parsed.visual_clues || visualClues,
-                question: parsed.question,
+                question: normalizeAkinatorQuestion(String(parsed.question)),
                 media_candidate: parsed.media_candidate || undefined,
             } as MediaDialogueState;
         }
         return null;
     } catch (e) {
+        console.error("Failed to parse continueMediaDialogue JSON:", e, {
+            jsonPreview: parsedResult.rawText.slice(0, 240),
+            parts: summarizeParts(parts),
+        });
         return null;
     }
 }
@@ -755,23 +898,33 @@ export async function analyzeProductImage(
     const prompt = `あなたはプロの「メルカリ出品アシスタント」です。
 ユーザーが売りたい商品の写真を送ってきました。
 画像を分析し、検索ツールも使って、商品名や相場を特定してください。
-そして、出品に必要な情報を整理し、ユーザーに最初の質問（または確認）を行ってください。
+このフローはクイズではありません。最短で商品を特定してください。
 ${persona}
 
+【最重要ルール】
+- 初手で最有力の商品候補を提示し、確認質問を1つだけ出す。
+- 雑談やトリビアは不要。
+- first_question は「はい/違う」で答えられる確認形式を優先。
+- 候補が不確実なら「商品名か型番を教えてください」と短く聞く。
+
 【タスク】
-1. 画像から商品（ブランド、型番、状態）を特定する。
-2. Google検索で「メルカリ 売り切れ」などの情報を探し、相場（price_estimate）を調べる。
-3. ユーザーに声をかける最初のメッセージ(first_question)を作成する。
+1. 画像から商品（ブランド、型番、状態）を推定する。
+2. Google検索で「メルカリ 売り切れ」等を参考に相場（price_estimate）を推定する。
+3. 出品文作成に必要な最小情報を extracted_info に格納する。
+4. first_question で「商品特定」を最優先して確認する。
 
 【出力形式 - JSONのみ】
 {
   "image_summary": "画像の視覚的特徴",
   "extracted_info": {
+    "type": "sell_dialogue",
+    "identity_confirmed": false,
     "category": "推定カテゴリ",
     "product_name": "推定商品名・型番",
-    "price_estimate": "推定相場（例: 3000円〜5000円）"
+    "price_estimate": "推定相場（例: 3000円〜5000円）",
+    "condition": "推定状態（不明なら空文字）"
   },
-  "first_question": "ユーザーへの最初の質問（1つだけ）。\n例：『これはダイソンのV10ですね！相場は1万円前後のようです。型番はSV12で合っていますか？』"
+  "first_question": "ユーザーへの最初の質問（1つだけ）。\n例：『これはダイソン V8 Slimで合っていますか？違う場合は商品名や型番を教えてください。』"
 }
 `;
 
@@ -790,28 +943,45 @@ ${persona}
                 ],
             }],
             tools: [{ google_search: {} }], // Grounding有効化
-            generationConfig: { response_mime_type: "application/json", temperature: 0.5 },
+            generationConfig: { temperature: 0.5 },
         }),
     });
 
     if (!response.ok) {
-        console.error("analyzeProductImage failed:", response.status);
+        const errorText = await response.text();
+        console.error("analyzeProductImage failed:", response.status, errorText);
         return null;
     }
 
     const data = await response.json();
-    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "null";
+    const parts = data.candidates?.[0]?.content?.parts;
+    const parsedResult = parseJsonFromParts(parts);
+    if (!parsedResult.parsed) {
+        console.error("analyzeProductImage: no text/json part", summarizeParts(parts));
+        return null;
+    }
 
     try {
-        const parsed = JSON.parse(jsonText);
+        const parsed = parsedResult.parsed as any;
+        const extractedInfo = parsed.extracted_info || {};
+        if (typeof extractedInfo === "object" && extractedInfo !== null) {
+            extractedInfo.type = "sell_dialogue";
+        }
+
         return {
-            image_summary: parsed.image_summary || "",
-            extracted_info: parsed.extracted_info || {},
-            next_question: parsed.first_question || "詳細を教えていただけますか？",
+            image_summary: String(parsed.image_summary || ""),
+            extracted_info: extractedInfo,
+            next_question: normalizeSingleQuestion(
+                String(parsed.first_question || ""),
+                "これはどんな商品ですか？商品名や型番を教えてください。"
+            ),
             is_sufficient: false
         };
     } catch (e) {
-        console.error("Failed to parse analyzeProductImage JSON:", e);
+        console.error("Failed to parse analyzeProductImage JSON:", e, {
+            jsonPreview: parsedResult.rawText.slice(0, 240),
+            parts: summarizeParts(parts),
+        });
         return null;
     }
 }
@@ -830,6 +1000,7 @@ export async function continueSellingDialogue(
     const persona = getPersonaInstruction(userContext);
     const prompt = `あなたはプロの「メルカリ出品アシスタント」です。
 ユーザーとの対話を通じて、出品文を完成させます。
+このフローはクイズではありません。最短で商品を特定して進めてください。
 ${persona}
 
 【現状の情報】
@@ -838,12 +1009,17 @@ ${persona}
 会話履歴: ${JSON.stringify(dialogueHistory.slice(-4))}
 ユーザーの回答: "${userReply}"
 
+【優先順位】
+1. 商品特定（product_name）を最優先。否定されたら即座に別候補または型番確認へ。
+2. 特定後に、出品に必要な不足情報（状態・カテゴリなど）を最小ターンで回収。
+3. 早く十分情報が揃えば、すぐ listing を生成。
+
 【タスク】
-1. ユーザーの回答から情報を抽出し、extracted_infoを更新する。
-2. 出品文作成に十分か判定する (is_sufficient)。
-   - 必須: 商品名、状態、カテゴリ
-3. 不十分なら: 次の質問 (next_question) を生成。
-4. 十分なら: 出品文 (listing) を生成。
+1. ユーザー回答を反映して extracted_info を更新する。
+2. is_sufficient を判定する（必須: 商品名、状態、カテゴリ）。
+3. 不十分なら next_question を1つだけ返す（短く具体的に）。
+4. 十分なら listing を返す。
+5. extracted_info.type は必ず "sell_dialogue" を維持する。
 
 【出力形式 - JSONのみ】
 {
@@ -868,24 +1044,287 @@ ${persona}
     });
 
     if (!response.ok) {
-        console.error("continueSellingDialogue failed:", response.status);
+        const errorText = await response.text();
+        console.error("continueSellingDialogue failed:", response.status, errorText);
         return null;
     }
 
     const data = await response.json();
-    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "null";
+    const parts = data.candidates?.[0]?.content?.parts;
+    const parsedResult = parseJsonFromParts(parts);
+    if (!parsedResult.parsed) {
+        console.error("continueSellingDialogue: no text/json part", summarizeParts(parts));
+        return null;
+    }
 
     try {
-        const parsed = JSON.parse(jsonText);
+        const parsed = parsedResult.parsed as any;
+        const extractedInfo = parsed.extracted_info || currentInfo;
+        if (typeof extractedInfo === "object" && extractedInfo !== null) {
+            extractedInfo.type = "sell_dialogue";
+        }
         return {
             image_summary: imageSummary,
-            extracted_info: parsed.extracted_info || currentInfo,
-            next_question: parsed.next_question || null,
+            extracted_info: extractedInfo,
+            next_question: parsed.next_question
+                ? normalizeSingleQuestion(String(parsed.next_question), "商品の状態を教えてください。")
+                : null,
             is_sufficient: parsed.is_sufficient || false,
             listing: parsed.listing
         };
     } catch (e) {
-        console.error("Failed to parse continueSellingDialogue JSON:", e);
+        console.error("Failed to parse continueSellingDialogue JSON:", e, {
+            jsonPreview: parsedResult.rawText.slice(0, 240),
+            parts: summarizeParts(parts),
+        });
+        return null;
+    }
+}
+
+export interface LedgerDialogueState {
+    document_clues: string;
+    question: string;
+    ledger_candidate?: LedgerItem;
+}
+
+export type IdentifyLedgerResult = LedgerItem | LedgerDialogueState | null;
+
+const LEDGER_CATEGORY_SET = new Set(["utility", "subscription", "insurance", "telecom", "other"]);
+
+function normalizeLedgerCategory(input: unknown): LedgerItem["category"] {
+    const value = String(input ?? "").trim().toLowerCase();
+    if (LEDGER_CATEGORY_SET.has(value)) {
+        return value as LedgerItem["category"];
+    }
+    return "other";
+}
+
+function normalizeLedgerItem(raw: any): LedgerItem | null {
+    if (!raw || typeof raw !== "object") return null;
+    const serviceName = String(raw.service_name ?? "").trim();
+    if (!serviceName) return null;
+
+    const accountIdentifier = raw.account_identifier == null
+        ? undefined
+        : String(raw.account_identifier).trim() || undefined;
+
+    const note = raw.note == null ? undefined : String(raw.note).trim() || undefined;
+
+    let monthlyCost: number | undefined = undefined;
+    if (raw.monthly_cost != null && raw.monthly_cost !== "") {
+        const parsed = Number(raw.monthly_cost);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+            monthlyCost = Math.round(parsed);
+        }
+    }
+
+    return {
+        service_name: serviceName,
+        category: normalizeLedgerCategory(raw.category),
+        account_identifier: accountIdentifier,
+        monthly_cost: monthlyCost,
+        note,
+    };
+}
+
+/**
+ * 台帳向け: 画像から契約書類を最短で特定するための対話開始
+ */
+export async function identifyLedgerDocument(
+    imageBase64: string,
+    mimeType: string,
+    userContext: UserContext | null
+): Promise<LedgerDialogueState | null> {
+    const persona = getPersonaInstruction(userContext);
+    const prompt = `あなたは「契約台帳登録アシスタント」です。
+ユーザーが送った書類画像を最短で特定し、登録候補を作ります。
+${persona}
+
+【重要】
+- クイズ形式にしない。雑談しない。
+- 1ターン目で最有力候補を提示し、確認質問を1つだけ返す。
+- 候補が弱い場合も、次に必要な確認を1つだけ聞く。
+- トリビアは禁止。
+
+【出力形式 - JSONのみ】
+{
+  "document_clues": "画像から読める視覚情報",
+  "question": "確認質問（1つだけ）",
+  "ledger_candidate": {
+    "service_name": "推定サービス名",
+    "category": "utility|subscription|insurance|telecom|other",
+    "account_identifier": "契約番号やID（不明ならnull）",
+    "monthly_cost": 1234,
+    "note": "補足メモ"
+  },
+  "confidence": 0.0
+}
+JSONのみを返してください。`;
+
+    const apiKey = Deno.env.get("GEMINI_API_KEY")!;
+    const model = "gemini-2.5-flash";
+    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [{
+                parts: [
+                    { text: prompt },
+                    { inline_data: { mime_type: mimeType, data: imageBase64 } },
+                ],
+            }],
+            tools: [{ google_search: {} }],
+            generationConfig: { temperature: 0.3 },
+        }),
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error("identifyLedgerDocument failed:", response.status, errorText);
+        return null;
+    }
+
+    const data = await response.json();
+    const parts = data.candidates?.[0]?.content?.parts;
+    const parsedResult = parseJsonFromParts(parts);
+    if (!parsedResult.parsed) {
+        console.error("identifyLedgerDocument: no text/json part", summarizeParts(parts));
+        return null;
+    }
+
+    try {
+        const parsed = parsedResult.parsed as any;
+        const candidate = normalizeLedgerItem(parsed.ledger_candidate);
+        return {
+            document_clues: String(parsed.document_clues || "情報不足"),
+            question: normalizeSingleQuestion(
+                String(parsed.question || ""),
+                "これはどのサービスの請求書・契約書ですか？"
+            ),
+            ledger_candidate: candidate || undefined,
+        };
+    } catch (e) {
+        console.error("Failed to parse identifyLedgerDocument JSON:", e, {
+            jsonPreview: parsedResult.rawText.slice(0, 240),
+            parts: summarizeParts(parts),
+        });
+        return null;
+    }
+}
+
+/**
+ * 台帳向け: 対話継続で契約情報候補を確定する
+ */
+export async function continueLedgerDialogue(
+    documentClues: string,
+    dialogueHistory: { role: string; text: string }[],
+    userReply: string,
+    ledgerCandidate: LedgerItem | null | undefined,
+    userContext: UserContext | null
+): Promise<IdentifyLedgerResult> {
+    const persona = getPersonaInstruction(userContext);
+    const candidateInfo = ledgerCandidate
+        ? JSON.stringify(ledgerCandidate)
+        : "候補なし";
+
+    const prompt = `あなたは「契約台帳登録アシスタント」です。
+画像に写っている契約書類を、ユーザーとの短い対話で確定してください。
+${persona}
+
+【現状】
+書類情報: ${documentClues}
+現在の候補: ${candidateInfo}
+会話履歴: ${JSON.stringify(dialogueHistory.slice(-6))}
+ユーザーの最新回答: "${userReply}"
+
+【厳守ルール】
+1. クイズ形式にしない。雑談しない。
+2. ユーザーが肯定（はい/合ってる等）したら identified=true で確定。
+3. ユーザーが否定したら別候補を提示して確認質問を1つ返す。
+4. ユーザーがサービス名・金額・IDを言ったら候補へ即反映する。
+5. 質問は1つだけ。最短（1〜2ターン）で確定を目指す。
+
+【出力形式 - JSONのみ】
+確定パターン:
+{
+  "identified": true,
+  "data": {
+    "service_name": "...",
+    "category": "utility|subscription|insurance|telecom|other",
+    "account_identifier": "...",
+    "monthly_cost": 1234,
+    "note": "..."
+  }
+}
+
+継続パターン:
+{
+  "identified": false,
+  "document_clues": "更新後の書類情報",
+  "question": "次の確認質問（1つだけ）",
+  "ledger_candidate": {
+    "service_name": "...",
+    "category": "...",
+    "account_identifier": "...",
+    "monthly_cost": 1234,
+    "note": "..."
+  }
+}
+
+JSONのみを返してください。`;
+
+    const apiKey = Deno.env.get("GEMINI_API_KEY")!;
+    const model = "gemini-2.5-flash";
+    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { response_mime_type: "application/json", temperature: 0.3 },
+        }),
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error("continueLedgerDialogue failed:", response.status, errorText);
+        return null;
+    }
+
+    const data = await response.json();
+    const parts = data.candidates?.[0]?.content?.parts;
+    const parsedResult = parseJsonFromParts(parts);
+    if (!parsedResult.parsed) {
+        console.error("continueLedgerDialogue: no text/json part", summarizeParts(parts));
+        return null;
+    }
+
+    try {
+        const parsed = parsedResult.parsed as any;
+        if (parsed.identified === true) {
+            return normalizeLedgerItem(parsed.data);
+        }
+
+        if (parsed.identified === false) {
+            return {
+                document_clues: String(parsed.document_clues || documentClues || "情報不足"),
+                question: normalizeSingleQuestion(
+                    String(parsed.question || ""),
+                    "サービス名や契約先を教えてください。"
+                ),
+                ledger_candidate: normalizeLedgerItem(parsed.ledger_candidate) || ledgerCandidate || undefined,
+            } as LedgerDialogueState;
+        }
+
+        return null;
+    } catch (e) {
+        console.error("Failed to parse continueLedgerDialogue JSON:", e, {
+            jsonPreview: parsedResult.rawText.slice(0, 240),
+            parts: summarizeParts(parts),
+        });
         return null;
     }
 }

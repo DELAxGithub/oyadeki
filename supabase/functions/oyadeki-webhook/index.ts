@@ -5,7 +5,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { verifySignature } from "../_shared/line-signature.ts";
 import { isDuplicate, isDuplicateAction } from "../_shared/dedup.ts";
 import { logUsage, getUserContext, UserContext } from "../_shared/supabase-client.ts";
-import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, MediaDialogueState, IdentifyMediaResult, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, continueMediaDialogue, chatWithContext, enrichMediaInfo } from "../_shared/gemini-client.ts";
+import { generateText, analyzeImage, extractLedgerInfo, LedgerItem, classifyImageIntent, identifyMedia, MediaInfo, MediaDialogueState, IdentifyMediaResult, generateListing, ListingInfo, analyzeProductImage, continueSellingDialogue, continueMediaDialogue, chatWithContext, enrichMediaInfo, identifyLedgerDocument, continueLedgerDialogue, LedgerDialogueState } from "../_shared/gemini-client.ts";
 import { getSupabaseClient } from "../_shared/supabase-client.ts";
 
 const LINE_API_BASE = "https://api.line.me/v2/bot";
@@ -58,9 +58,51 @@ async function replyMessage(replyToken: string, messages: unknown[]) {
   if (!resp.ok) {
     const errorText = await resp.text();
     console.error("replyMessage FAILED:", resp.status, errorText);
+    console.error("Payload preview:", JSON.stringify(messages).slice(0, 500));
     throw new Error(`LINE reply failed: ${resp.status} - ${errorText}`);
   }
   console.log("replyMessage: success");
+}
+
+/**
+ * LINE Messaging APIでプッシュ送信（replyToken失効時の保険）
+ */
+async function pushMessage(userId: string, messages: unknown[]) {
+  const accessToken = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN")!;
+  const body = JSON.stringify({ to: userId, messages });
+  console.log("pushMessage: sending", body.length, "bytes");
+  const resp = await fetch(`${LINE_API_BASE}/message/push`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body,
+  });
+  if (!resp.ok) {
+    const errorText = await resp.text();
+    console.error("pushMessage FAILED:", resp.status, errorText);
+    throw new Error(`LINE push failed: ${resp.status} - ${errorText}`);
+  }
+  console.log("pushMessage: success");
+}
+
+/**
+ * reply失敗時に、replyToken失効系エラーならpushへフォールバック
+ */
+async function replyOrPush(replyToken: string, userId: string, messages: unknown[]) {
+  try {
+    await replyMessage(replyToken, messages);
+  } catch (error) {
+    const text = String(error);
+    const isReplyTokenIssue =
+      text.includes("LINE reply failed: 400") ||
+      /reply token|invalid reply token|expired/i.test(text);
+    if (!isReplyTokenIssue) throw error;
+
+    console.warn("reply failed due to token issue, falling back to push:", text);
+    await pushMessage(userId, messages);
+  }
 }
 
 /**
@@ -109,18 +151,25 @@ async function fetchLineImageBytes(
   return { bytes: new Uint8Array(arrayBuffer), mimeType: contentType };
 }
 
+function toBase64Buffer(bytes: Uint8Array): ArrayBuffer {
+  // Ensure we pass a strict ArrayBuffer to std/base64 encode.
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer as ArrayBuffer;
+}
+
 // Simplified: Always use preview image to avoid OOM and dependencies
 async function getImageContent(messageId: string): Promise<{ base64: string; mimeType: string }> {
   try {
     // Prefer preview image for safety (smaller size)
     const preview = await fetchLineImageBytes(messageId, "preview");
     console.log("Using preview image size:", preview.bytes.length);
-    return { base64: encodeBase64(preview.bytes.buffer), mimeType: preview.mimeType };
+    return { base64: encodeBase64(toBase64Buffer(preview.bytes)), mimeType: preview.mimeType };
   } catch (error) {
     console.error("Failed to fetch preview, trying original content:", error);
     // Fallback to original content (risky but better than nothing)
     const original = await fetchLineImageBytes(messageId, "content");
-    return { base64: encodeBase64(original.bytes.buffer), mimeType: original.mimeType };
+    return { base64: encodeBase64(toBase64Buffer(original.bytes)), mimeType: original.mimeType };
   }
 }
 
@@ -373,17 +422,6 @@ function buildSellSupportFlexMessage() {
         contents: [
           {
             type: "button",
-            style: "primary",
-            action: { type: "camera", label: "📷 カメラで撮る" }
-          },
-          {
-            type: "button",
-            style: "secondary",
-            action: { type: "cameraRoll", label: "🖼️ ライブラリから選ぶ" }
-          },
-          { type: "separator", margin: "md" },
-          {
-            type: "button",
             style: "link",
             height: "sm",
             action: { type: "message", label: "≡ メニューに戻る", text: "メニュー" },
@@ -391,6 +429,18 @@ function buildSellSupportFlexMessage() {
           }
         ]
       }
+    },
+    quickReply: {
+      items: [
+        {
+          type: "action",
+          action: { type: "camera", label: "📷 カメラで撮る" }
+        },
+        {
+          type: "action",
+          action: { type: "cameraRoll", label: "🖼️ ライブラリ" }
+        }
+      ]
     }
   };
 }
@@ -734,6 +784,74 @@ function buildMediaConfirmFlexMessage(media: MediaInfo) {
 // ==================== 台帳関連（既存） ====================
 
 /**
+ * 視聴記録(見た)モードかどうかを確認（直近のアクションがmedia_mode_triggerで、かつ5分以内か）
+ */
+async function isInMediaMode(userId: string): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  const fiveMinutesAgoMs = Date.now() - 5 * 60 * 1000;
+  const fiveMinutesAgoIso = new Date(fiveMinutesAgoMs).toISOString();
+
+  const { data, error } = await supabase
+    .from("usage_logs")
+    .select("created_at")
+    .eq("line_user_id", userId)
+    .eq("action_type", "media_mode_trigger")
+    .gte("created_at", fiveMinutesAgoIso)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error("isInMediaMode query error:", error);
+    return false;
+  }
+
+  const latest = data?.[0]?.created_at;
+  if (!latest) return false;
+
+  const latestMs = Date.parse(latest);
+  if (Number.isNaN(latestMs)) {
+    console.warn("isInMediaMode: invalid created_at", latest);
+    return false;
+  }
+
+  return latestMs >= fiveMinutesAgoMs;
+}
+
+/**
+ * 台帳モードかどうかを確認（直近のアクションがledger_mode_triggerで、かつ5分以内か）
+ */
+async function isInLedgerMode(userId: string): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  const fiveMinutesAgoMs = Date.now() - 5 * 60 * 1000;
+  const fiveMinutesAgoIso = new Date(fiveMinutesAgoMs).toISOString();
+
+  const { data, error } = await supabase
+    .from("usage_logs")
+    .select("created_at")
+    .eq("line_user_id", userId)
+    .eq("action_type", "ledger_mode_trigger")
+    .gte("created_at", fiveMinutesAgoIso)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("isInLedgerMode query error:", error);
+    return false;
+  }
+
+  if (!data) return false;
+
+  const latestMs = Date.parse(data.created_at);
+  if (Number.isNaN(latestMs)) {
+    console.warn("isInLedgerMode: invalid created_at", data.created_at);
+    return false;
+  }
+
+  return latestMs >= fiveMinutesAgoMs;
+}
+
+/**
  * 出品モードかどうかを確認（5分以内にsell_mode_startがあるか）
  */
 /**
@@ -741,20 +859,33 @@ function buildMediaConfirmFlexMessage(media: MediaInfo) {
  */
 async function isInSellMode(userId: string): Promise<boolean> {
   const supabase = getSupabaseClient();
-  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const fiveMinutesAgoMs = Date.now() - 5 * 60 * 1000;
+  const fiveMinutesAgoIso = new Date(fiveMinutesAgoMs).toISOString();
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("usage_logs")
-    .select("action_type, created_at")
+    .select("created_at")
     .eq("line_user_id", userId)
+    .eq("action_type", "sell_mode_start")
+    .gte("created_at", fiveMinutesAgoIso)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
+  if (error) {
+    console.error("isInSellMode query error:", error);
+    return false;
+  }
+
   if (!data) return false;
 
-  // 直近のアクションが出品モード開始で、かつ5分以内であれば有効
-  return data.action_type === "sell_mode_start" && data.created_at >= fiveMinutesAgo;
+  const latestMs = Date.parse(data.created_at);
+  if (Number.isNaN(latestMs)) {
+    console.warn("isInSellMode: invalid created_at", data.created_at);
+    return false;
+  }
+
+  return latestMs >= fiveMinutesAgoMs;
 }
 
 /**
@@ -812,9 +943,18 @@ async function getRecentCompletedSellItem(userId: string) {
     .eq("status", "completed")
     .gt("updated_at", timeLimit)
     .order("updated_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return data;
+    .limit(10);
+
+  if (!data || data.length === 0) return null;
+
+  for (const item of data) {
+    const type = (item.extracted_info as any)?.type;
+    if (type === "media_dialogue" || type === "media_confirm" || type === "ledger_dialogue") {
+      continue;
+    }
+    return item;
+  }
+  return null;
 }
 
 /**
@@ -924,55 +1064,80 @@ async function handleMessageEvent(event: LineEvent) {
   // グループ/ルームでの静音設定
   // 画像は常に反応、テキストは「呼びかけ」のみ反応
   if ((sourceType === "group" || sourceType === "room") && message.type === "text") {
-    const text = message.text?.toLowerCase() || "";
-    // キーワードを拡張：メニュー系も反応するように
-    const keywords = ["オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定", "menu", "メニュー"];
+    const text = message.text?.toLowerCase().trim() || "";
+    // 呼びかけキーワード。モード開始コマンドも含める。
+    const keywords = [
+      "オヤデキ", "おやでき", "使い方", "ヘルプ", "help", "台帳", "設定", "menu", "メニュー",
+      "見た", "見たもの", "メディアログ", "視聴記録", "売る", "出品", "メルカリ",
+    ];
     const isCalled = keywords.some(k => text.includes(k));
 
     if (!isCalled) {
-      console.log("Group message ignored (no keyword match)");
-      return;
+      // ただし、すでに対話中/モード中なら短文応答（「はい」「違います」等）を通す。
+      try {
+        const [activeItem, mediaMode, sellMode, ledgerMode] = await Promise.all([
+          getActiveSellItem(userId),
+          isInMediaMode(userId),
+          isInSellMode(userId),
+          isInLedgerMode(userId),
+        ]);
+        const hasActiveDialogue = !!activeItem;
+        const hasActiveMode = mediaMode || sellMode || ledgerMode;
+        if (!hasActiveDialogue && !hasActiveMode) {
+          console.log("Group message ignored (no keyword/mode/dialogue match)");
+          return;
+        }
+        console.log("Group message allowed due to active dialogue/mode");
+      } catch (e) {
+        // 判定に失敗した場合は fail-open で処理を継続（無反応を避ける）
+        console.warn("Group filter check failed; allowing message:", e);
+      }
     }
   }
 
   try {
     if (message.type === "text" && message.text) {
       console.log("Processing text message:", message.text);
+      const lowerText = message.text.toLowerCase().trim();
+
+      // Priority Check: Sell Mode
+      // Priority Check: Sell Mode
+      if (lowerText === "売る" || lowerText === "出品" || lowerText === "メルカリ") {
+        try {
+          await logUsage(userId, "sell_mode_start", {});
+          const flexMsg = buildSellSupportFlexMessage();
+          // @ts-ignore: line message type
+          await replyMessage(replyToken, [flexMsg]);
+        } catch (e) {
+          console.error("Sell mode error:", e);
+          await replyMessage(replyToken, [{ type: "text", text: "すみません、出品メニューの表示に失敗しました。\n(エラー: " + String(e) + ")" }]);
+        }
+        return;
+      }
 
       // 特殊コマンド処理
-      const lowerText = message.text.toLowerCase().trim();
 
       // メインメニュー表示
       // グループで「オヤデキ」と呼ばれたときもここに来る
       if (["メニュー", "menu", "オヤデキ", "おやでき"].includes(lowerText)) {
-        await logUsage(userId, "main_menu_trigger", {});
+        try { await logUsage(userId, "main_menu_trigger", {}); } catch (e) { console.error("logUsage failed", e); }
         await replyMessage(replyToken, [buildMainMenuFlexMessage()]);
-        return;
-      }
-
-      // メルカリ出品モード
-      if (lowerText === "売る" || lowerText === "出品" || lowerText === "メルカリ") {
-        await logUsage(userId, "sell_mode_start", {});
-        await replyMessage(replyToken, [buildSellSupportFlexMessage()]);
         return;
       }
 
       // メディアログ閲覧
       // メディアログ (見たものモード)
       if (lowerText === "見た" || lowerText === "見たもの" || lowerText === "メディアログ" || lowerText === "視聴記録") {
-        await logUsage(userId, "media_mode_trigger", {});
+        try { await logUsage(userId, "media_mode_trigger", {}); } catch (e) { console.error("logUsage media failed", e); }
 
         await replyMessage(replyToken, [{
-          type: "template",
-          altText: "何を見ていますか？",
-          template: {
-            type: "buttons",
-            title: "📺 視聴記録モード",
-            text: "今見ているテレビや映画の画面を\n写真で送ってください！\n作品名を記録します。",
-            actions: [
-              { type: "cameraRoll", label: "ライブラリから写真を選ぶ" },
-              { type: "camera", label: "カメラで撮る" },
-              { type: "postback", label: "📖 これまでの記録を見る", data: "action=view_media_history" }
+          type: "text",
+          text: "今見ているテレビや映画の画面を\n写真で送ってください！\n作品名を記録します。",
+          quickReply: {
+            items: [
+              { type: "action", action: { type: "cameraRoll", label: "ライブラリ" } },
+              { type: "action", action: { type: "camera", label: "カメラ" } },
+              { type: "action", action: { type: "postback", label: "📖 履歴を見る", data: "action=view_media_history" } }
             ]
           }
         }]);
@@ -981,19 +1146,16 @@ async function handleMessageEvent(event: LineEvent) {
 
       // 台帳モード
       if (lowerText === "台帳" || lowerText === "契約台帳" || lowerText.includes("ledger")) {
-        await logUsage(userId, "ledger_mode_trigger", {});
+        try { await logUsage(userId, "ledger_mode_trigger", {}); } catch (e) { console.error("logUsage ledger failed", e); }
 
         await replyMessage(replyToken, [{
-          type: "template",
-          altText: "契約台帳メニュー",
-          template: {
-            type: "buttons",
-            title: "📑 契約台帳",
-            text: "契約書や請求書の写真を送ると\nAIが内容を読み取って登録します。",
-            actions: [
-              { type: "cameraRoll", label: "ライブラリから写真を選ぶ" },
-              { type: "camera", label: "カメラで撮る" },
-              { type: "postback", label: "📋 登録済みの台帳を見る", data: "action=view_ledger_list" }
+          type: "text",
+          text: "契約書や請求書の写真を送ると\nAIが内容を読み取って登録します。",
+          quickReply: {
+            items: [
+              { type: "action", action: { type: "cameraRoll", label: "ライブラリ" } },
+              { type: "action", action: { type: "camera", label: "カメラ" } },
+              { type: "action", action: { type: "postback", label: "📋 登録済一覧", data: "action=view_ledger_list" } }
             ]
           }
         }]);
@@ -1264,12 +1426,12 @@ async function handleMessageEvent(event: LineEvent) {
                 dialogue_history: history,
               });
 
-              await replyMessage(replyToken, [{
+              await replyOrPush(replyToken, userId, [{
                 type: "text",
                 text: "🎬 " + nextState.question
               }]);
             } else {
-              await replyMessage(replyToken, [{
+              await replyOrPush(replyToken, userId, [{
                 type: "text",
                 text: "🤔 もう少し詳しく教えてもらえますか？\n（例：出演者、ストーリー、放送局など）"
               }]);
@@ -1317,7 +1479,7 @@ async function handleMessageEvent(event: LineEvent) {
                   status: "questioning"
                 });
 
-                await replyMessage(replyToken, [{
+                await replyOrPush(replyToken, userId, [{
                   type: "text",
                   text: "🎬 " + nextState.question
                 }]);
@@ -1368,12 +1530,12 @@ async function handleMessageEvent(event: LineEvent) {
                   text: `🎬 「${mediaInfo.title}」${yearLine}${castLine}${scoreLine}${genreLine}${synopsisLine}\n\n💡 ${mediaInfo.trivia || ""}\n\nこの作品で合っていますか？\n→「はい」で評価へ\n→「違う」でやり直し`
                 });
 
-                await replyMessage(replyToken, confirmMessages);
+                await replyOrPush(replyToken, userId, confirmMessages);
               }
             } else {
               // エラーまたは会話終了 (nullの場合)
               // すぐに諦めず、ユーザーに入力を促す
-              await replyMessage(replyToken, [{
+              await replyOrPush(replyToken, userId, [{
                 type: "text",
                 text: "🤔 うーん、まだピンときていません...\n\nもう少し詳しく教えてもらえますか？\n（例：出演者、ストーリー、放送局など）"
               }]);
@@ -1383,13 +1545,94 @@ async function handleMessageEvent(event: LineEvent) {
             console.error("Media dialogue error:", dialogueError);
             // エラー時もユーザーに返信する（沈黙防止）
             try {
-              await replyMessage(replyToken, [{
+              await replyOrPush(replyToken, userId, [{
                 type: "text",
                 text: "すみません、処理中にエラーが発生しました。\nもう一度写真を送ってみてください📷"
               }]);
             } catch (replyErr) {
               console.error("Fallback reply also failed:", replyErr);
             }
+          }
+
+        } else if (info && info.type === "ledger_dialogue") {
+          // -------- 台帳特定対話（最短特定） --------
+          console.log("Continuing ledger dialogue for item:", activeSellItem.id);
+
+          try {
+            const history = (activeSellItem.dialogue_history || []) as { role: string; text: string }[];
+            history.push({ role: "user", text: message.text });
+
+            const storedCandidate = (info.ledger_candidate || null) as LedgerItem | null;
+            const result = await continueLedgerDialogue(
+              info.document_clues || activeSellItem.image_summary || "",
+              history,
+              message.text,
+              storedCandidate,
+              userContext
+            );
+
+            if (result) {
+              if ("document_clues" in result) {
+                // まだ特定継続
+                const nextState = result as LedgerDialogueState;
+                history.push({ role: "assistant", text: nextState.question });
+
+                await updateSellItem(activeSellItem.id, {
+                  extracted_info: {
+                    type: "ledger_dialogue",
+                    document_clues: nextState.document_clues,
+                    ledger_candidate: nextState.ledger_candidate || storedCandidate,
+                    source_message_id: info.source_message_id || null,
+                  },
+                  dialogue_history: history,
+                  status: "questioning",
+                });
+
+                await replyOrPush(replyToken, userId, [{
+                  type: "text",
+                  text: "🧾 " + nextState.question
+                }]);
+              } else {
+                // 特定完了 -> 登録確認カードを即提示
+                const identified = result as LedgerItem;
+                const sourceMessageId = typeof info.source_message_id === "string" && info.source_message_id
+                  ? info.source_message_id
+                  : `manual-${Date.now()}`;
+
+                await updateSellItem(activeSellItem.id, {
+                  extracted_info: {
+                    type: "ledger_dialogue",
+                    document_clues: info.document_clues || activeSellItem.image_summary || "",
+                    ledger_candidate: identified,
+                    source_message_id: sourceMessageId,
+                  },
+                  dialogue_history: history,
+                  status: "completed",
+                });
+
+                await logUsage(userId, "ledger_propose", { count: 1, source: "dialogue" });
+
+                const confirmCard = buildLedgerConfirmFlexMessage([identified], sourceMessageId);
+                await replyOrPush(replyToken, userId, [
+                  {
+                    type: "text",
+                    text: `🧾 「${identified.service_name}」として特定しました。\n内容を確認して、問題なければ「この内容で登録」を押してください。`
+                  },
+                  confirmCard as any
+                ]);
+              }
+            } else {
+              await replyOrPush(replyToken, userId, [{
+                type: "text",
+                text: "🧾 まだ特定しきれていません。\nサービス名や請求先名を短く教えてください。"
+              }]);
+            }
+          } catch (ledgerDialogueError) {
+            console.error("Ledger dialogue error:", ledgerDialogueError);
+            await replyOrPush(replyToken, userId, [{
+              type: "text",
+              text: "🧾 台帳の特定中にエラーが発生しました。\nもう一度写真を送ってください。"
+            }]);
           }
 
         } else {
@@ -1618,8 +1861,21 @@ async function handleMessageEvent(event: LineEvent) {
         }
 
         // ==================== 通常フロー（Intent判定） ====================
-        console.log("Classifying image intent...");
-        const intent = await classifyImageIntent(base64, mimeType);
+        // 直近のアクションでモード指定があれば、AI判定をスキップして強制的にIntentを決定
+        let intent = "";
+        const forcedMediaMode = await isInMediaMode(userId);
+
+        if (forcedMediaMode) {
+          console.log("Forcing intent: media (active mode)");
+          intent = "media";
+        } else if (await isInLedgerMode(userId)) {
+          console.log("Forcing intent: ledger (active mode)");
+          intent = "ledger";
+        } else {
+          console.log("Classifying image intent...");
+          intent = await classifyImageIntent(base64, mimeType);
+        }
+
         console.log("Image intent:", intent);
 
         if (intent === "media") {
@@ -1668,9 +1924,61 @@ async function handleMessageEvent(event: LineEvent) {
               text: "🎬 " + dialogueState.question
             }]);
           } else {
-            // メディアが特定できなかった場合 (null) → 救急箱フローにフォールバック
-            console.log("Media not identified, falling back to help flow");
-            await handleHelpImageFlow(replyToken, userId, base64, mimeType, message.id, userContext, startTime);
+            if (forcedMediaMode) {
+              console.warn("identifyMedia returned null during forced media mode");
+              await replyMessage(replyToken, [{
+                type: "text",
+                text: "🎬 うまく作品を読み取れませんでした。\nもう一度、画面全体がはっきり見える写真を送ってください。"
+              }]);
+            } else {
+              // 通常判定時のみ救急箱へフォールバック
+              console.log("Media not identified, falling back to help flow");
+              await handleHelpImageFlow(replyToken, userId, base64, mimeType, message.id, userContext, startTime);
+            }
+          }
+        } else if (intent === "ledger") {
+          // ==================== 台帳特定フロー（最短確認） ====================
+          console.log("Processing as ledger content (identify-first)...");
+          const ledgerState = await identifyLedgerDocument(base64, mimeType, userContext);
+
+          if (ledgerState) {
+            const supabase = getSupabaseClient();
+
+            // 既存のセッションがあればキャンセル
+            const activeItem = await getActiveSellItem(userId);
+            if (activeItem) {
+              await updateSellItem(activeItem.id, { status: "cancelled" });
+            }
+
+            const dialogueHistory = [
+              { role: "assistant", text: ledgerState.question }
+            ];
+
+            const { error: insertError } = await supabase.from("sell_items").insert({
+              line_user_id: userId,
+              status: "questioning",
+              image_summary: ledgerState.document_clues,
+              extracted_info: {
+                type: "ledger_dialogue",
+                document_clues: ledgerState.document_clues,
+                ledger_candidate: ledgerState.ledger_candidate || null,
+                source_message_id: message.id,
+              },
+              dialogue_history: dialogueHistory
+            });
+            if (insertError) {
+              console.error("sell_items insert error (ledger):", insertError);
+            }
+
+            await replyOrPush(replyToken, userId, [{
+              type: "text",
+              text: "🧾 " + ledgerState.question
+            }]);
+          } else {
+            await replyOrPush(replyToken, userId, [{
+              type: "text",
+              text: "🧾 書類の内容をうまく特定できませんでした。\n請求先やサービス名が見える写真でもう一度送ってください。"
+            }]);
           }
         } else if (intent === "sell") {
           // ==================== 出品提案フロー ====================

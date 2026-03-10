@@ -21,10 +21,11 @@ import {
     identifyMedia,
     analyzeImage,
     analyzeProductImage,
+    identifyLedgerDocument,
     continueMediaDialogue,
     type MediaInfo,
     type MediaDialogueState,
-    type IdentifyMediaResult,
+    type LedgerDialogueState,
 } from "../supabase/functions/_shared/gemini-client.ts";
 
 function colorLog(label: string, msg: string, color: string) {
@@ -78,7 +79,7 @@ async function main() {
     // ==================== Step 1: Intent判定 ====================
     console.log("\n--- Step 1: classifyImageIntent ---");
     const start1 = Date.now();
-    let intent: "help" | "media" | "sell";
+    let intent: "help" | "media" | "sell" | "ledger";
     try {
         intent = await classifyImageIntent(base64, mimeType);
         colorLog("OK", `Intent: "${intent}" (${Date.now() - start1}ms)`, "green");
@@ -93,7 +94,7 @@ async function main() {
         const start2 = Date.now();
         let dialogueState: MediaDialogueState | null;
         try {
-            dialogueState = await identifyMedia(base64, mimeType);
+            dialogueState = await identifyMedia(base64, mimeType, null);
             colorLog("OK", `identifyMedia完了 (${Date.now() - start2}ms)`, "green");
         } catch (e) {
             colorLog("ERROR", `identifyMedia threw: ${e}`, "red");
@@ -132,7 +133,8 @@ async function main() {
                     dialogueState.visual_clues,
                     [{ role: "assistant", text: dialogueState.question }],
                     "はい、そうです",  // テスト用: 肯定回答
-                    dialogueState.media_candidate
+                    dialogueState.media_candidate,
+                    null
                 );
                 colorLog("OK", `continueMediaDialogue完了 (${Date.now() - start3}ms)`, "green");
                 if (dialogueResult) {
@@ -163,7 +165,7 @@ async function main() {
         console.log("\n--- Step 2: analyzeProductImage (出品フロー) ---");
         const start2 = Date.now();
         try {
-            const sellResult = await analyzeProductImage(base64, mimeType);
+            const sellResult = await analyzeProductImage(base64, mimeType, null);
             colorLog("OK", `analyzeProductImage完了 (${Date.now() - start2}ms)`, "green");
             if (sellResult) {
                 console.log("  商品概要:", sellResult.image_summary);
@@ -174,6 +176,26 @@ async function main() {
             }
         } catch (e) {
             colorLog("ERROR", `analyzeProductImage threw: ${e}`, "red");
+        }
+
+    } else if (intent === "ledger") {
+        console.log("\n--- Step 2: identifyLedgerDocument (台帳フロー) ---");
+        const start2 = Date.now();
+        try {
+            const ledgerState = await identifyLedgerDocument(base64, mimeType, null);
+            colorLog("OK", `identifyLedgerDocument完了 (${Date.now() - start2}ms)`, "green");
+            if (ledgerState) {
+                const state = ledgerState as LedgerDialogueState;
+                console.log("  書類概要:", state.document_clues);
+                console.log("  質問:", state.question);
+                if (state.ledger_candidate) {
+                    console.log("  候補:", `${state.ledger_candidate.service_name} (${state.ledger_candidate.category})`);
+                }
+            } else {
+                colorLog("WARN", "identifyLedgerDocument returned null", "yellow");
+            }
+        } catch (e) {
+            colorLog("ERROR", `identifyLedgerDocument threw: ${e}`, "red");
         }
 
     } else {

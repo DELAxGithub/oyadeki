@@ -1,0 +1,42 @@
+# Oyadeki (オヤデキ)
+
+> LINE bot that supports parent-child communication. AI works strictly as a catalyst — drafting reply candidates, surfacing conversation topics, and bridging to phone calls — never as a proxy speaker. MVP: LINE-only UI with LIFF settings.
+
+## What this is
+
+Oyadeki ("親デキ" — "parents can do it") is a LINE-native communication-support bot for families. The product hypothesis is that parents become more self-driven communicators when AI assists as a catalyst rather than replacing their voice.
+
+- Webhook / API: Supabase Edge Functions (Deno)
+- Settings UI: LIFF (Deno Fresh on Deno Deploy)
+- Database: Supabase PostgreSQL (RLS enabled)
+- AI: Gemini 1.5 Pro (Flash fallback)
+- UI surface: LINE Messaging API + rich menu
+
+## Core features (MVP)
+
+1. **Draft generation** — given child/parent text, returns 3 draft replies (≤80 chars each) + 1 open question + 1 call-suggest line. UI: 4 buttons (Copy A / B / C / Use my own words). Drafts are prefixed `【AI下書き】`, NG words filtered, max one metaphor, no proxy-sending.
+2. **Digital First-Aid Kit (Vision)** — given a screenshot, returns ≤3 steps + PII warning + confirmation question. If uncertain, returns the question alone (no steps).
+3. **Call bridge** — fixed prompt: "Faster to talk than type. 5 minutes on a call?" One-tap confirmation now + T+6h follow-up (one snooze).
+
+## Success metrics
+
+- Self-write rate (user picks "use my own words") ≥ 30%
+- Copy-adoption ratio A/B/C measured by draft_id
+- Post-call-suggest T+6h "did you call?" response rate ≥ 40%
+- P50 ≤ 3.5s, P95 ≤ 7s for draft/vision endpoints
+
+## Where to start
+
+- [requirement.md](https://github.com/DELAxGithub/oyadeki/blob/main/requirement.md) — full requirements doc v1.3 (Japanese)
+- [CLAUDE.md](https://github.com/DELAxGithub/oyadeki/blob/main/CLAUDE.md) — project context, architecture, design decisions
+- [ROADMAP.md](https://github.com/DELAxGithub/oyadeki/blob/main/ROADMAP.md) — roadmap
+- [supabase/functions/oyadeki-webhook/](https://github.com/DELAxGithub/oyadeki/tree/main/supabase/functions) — LINE webhook handler
+- [liff/](https://github.com/DELAxGithub/oyadeki/tree/main/liff) — Deno Fresh settings UI
+
+## What this is NOT
+
+- Not a proxy speaker — AI never sends messages on the user's behalf, only drafts candidates
+- Not a timezone calculator (explicitly MVP-out)
+- Not a long-term message archive (no long-term body retention)
+- Not an external-data scraper or auto-poster
+- Not a standalone app — LINE is the only end-user surface; LIFF is just for settings
